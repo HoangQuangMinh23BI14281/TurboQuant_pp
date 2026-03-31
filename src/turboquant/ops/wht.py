@@ -20,6 +20,7 @@ def generate_hadamard(d: int, normalized: bool = True) -> torch.Tensor:
         current_d *= 2
         
     if normalized:
+        # Orthonormal normalization: 1/sqrt(d)
         H = H / math.sqrt(d)
         
     return H
@@ -28,6 +29,8 @@ def fwht(x: torch.Tensor) -> torch.Tensor:
     """
     Fast Walsh-Hadamard Transform (FWHT).
     Optimized iterative implementation for PyTorch.
+    Matching llama.cpp scaling: no normalization in forward pass.
+    
     Complexity: O(d log d) where d is the last dimension of x.
     x shape: (..., d) where d is a power of 2.
     """
@@ -38,7 +41,10 @@ def fwht(x: torch.Tensor) -> torch.Tensor:
     # Standard iterative FWHT
     # x shape: (..., d)
     original_shape = x.shape
-    res = x.float().reshape(-1, d)
+    original_dtype = x.dtype
+    # Use float32 for half-precision inputs, otherwise use input dtype (e.g. float64)
+    calc_dtype = torch.float32 if x.dtype in [torch.half, torch.bfloat16] else x.dtype
+    res = x.to(calc_dtype).reshape(-1, d)
     
     num_steps = int(math.log2(d))
     for i in range(num_steps):
@@ -56,13 +62,14 @@ def fwht(x: torch.Tensor) -> torch.Tensor:
         
     res = res.reshape(original_shape)
     
-    # Normalize by sqrt(d) for orthonormality
-    return res / math.sqrt(float(d))
+    # Matching llama.cpp: No normalization here.
+    # We cast back to original_dtype for consistency.
+    return res.to(original_dtype)
 
 def ifwht(x: torch.Tensor) -> torch.Tensor:
     """
     Inverse Fast Walsh-Hadamard Transform.
-    Since the normalized WHT is its own inverse (orthonormal and symmetric):
-    ifwht(x) == fwht(x)
+    Matching llama.cpp scaling: divided by d.
     """
-    return fwht(x)
+    d = x.shape[-1]
+    return fwht(x) / float(d)
