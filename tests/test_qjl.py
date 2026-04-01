@@ -1,7 +1,7 @@
 import torch
 import math
 import pytest
-from turboquant.quant.quantizer import TurboQuantProd, MSEQuantized
+from turboquant.quant.quantizer import TurboQuantProd, MSEQuantized, ProdQuantized
 from turboquant.kernels.fused_attention import attention_score_prod
 
 @pytest.mark.parametrize("d", [128, 256])
@@ -49,6 +49,11 @@ def test_qjl_correlation_improvement(d, bits):
     # Target SOTA level: > 0.99 for 4-bit
     if bits >= 4:
         assert corr_prod > 0.99, f"Product correlation {corr_prod:.4f} too low for {bits}-bits"
+    
+    # ADVANCED METRICS FROM DEBUG_QJL
+    assert q_module.mse_quantizer.n_rotation_passes >= 2, "SOTA requires at least 2 rotation passes"
+    assert quantized.norms.mean() > 0, "Key norms should be positive"
+    assert quantized.residual_norms.mean() < quantized.norms.mean(), "Residual should be smaller than total norm"
 
 def test_qjl_correction_scale():
     """Verify QJL correction is within expected numerical bounds."""
@@ -72,3 +77,7 @@ def test_qjl_correction_scale():
     # Mean correction should be small relative to mean score
     assert correction.abs().mean() < scores_mse.abs().mean(), "QJL correction dominates the attention score!"
     assert q_module.block_size == 128, "SOTA Block Size must be 128"
+    
+    # Range check
+    assert scores_full.max() < 20.0, "Score explosion detected!"
+    assert scores_full.min() > -20.0, "Score collapse detected!"
