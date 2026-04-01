@@ -21,7 +21,8 @@ def generate_hadamard(d: int, normalized: bool = True) -> torch.Tensor:
         
     if normalized:
         # Orthonormal normalization: 1/sqrt(d)
-        H = H / math.sqrt(d)
+        # We ensure the division happens in float64 to prevent precision loss.
+        H = H.to(torch.float64) / math.sqrt(d)
         
     return H
 
@@ -62,14 +63,13 @@ def fwht(x: torch.Tensor) -> torch.Tensor:
         
     res = res.reshape(original_shape)
     
-    # Matching llama.cpp: No normalization here.
-    # We cast back to original_dtype for consistency.
-    return res.to(original_dtype)
+    # Orthonormal normalization: divide by sqrt(d) (ensuring dtype preservation)
+    res_norm = res / torch.tensor(math.sqrt(d), dtype=res.dtype, device=res.device)
+    return res_norm.to(original_dtype)
 
 def ifwht(x: torch.Tensor) -> torch.Tensor:
     """
     Inverse Fast Walsh-Hadamard Transform.
-    Matching llama.cpp scaling: divided by d.
+    Since FWHT is now orthonormal, it is its own inverse.
     """
-    d = x.shape[-1]
-    return fwht(x) / float(d)
+    return fwht(x)

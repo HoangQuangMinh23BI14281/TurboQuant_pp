@@ -96,17 +96,20 @@ def attention_score_prod(
 
     dim = quantizer.dim
     block_size = quantizer.block_size
-    rotation_scale = quantizer.mse_quantizer.rotation_scale
+    # Term 1: MSE contribution
 
     # ── Term 1: MSE contribution ──
     # Dequantize keys using MSE stage only, then dot with query
     mse_q = MSEQuantized(
         indices=quantized_key.mse_indices,
         norms=quantized_key.norms,
+        scales=quantized_key.scales,
         bits=quantized_key.mse_bits,
         packed=quantized_key.packed,
     )
     keys_mse = quantizer.mse_quantizer.dequantize(mse_q)  # (..., n_k, dim)
+    
+    # PyTorch dequantize is now isometric, so base scores are already in original domain
     scores_mse = torch.matmul(query.float(), keys_mse.float().transpose(-2, -1))
 
     # ── Term 2: QJL correction ──
@@ -114,61 +117,44 @@ def attention_score_prod(
     #
     # During quantize:
     #   1. key was normalized: k_unit = k / ||k||
-    #   2. k_unit was padded and rotated: k_rot = Rot(pad(k_unit))
-    #   3. k_rot was scaled: k_scaled = k_rot / rotation_scale
-    #   4. Quantized in scaled domain, residual computed: r_scaled = k_scaled - centroids
-    #   5. Residual was scaled back: r_rot = r_scaled * rotation_scale
-    #   6. QJL applied to r_rot: projected = WHT(qjl_signs * r_rot)
-    #   7. sign_bits = sign(projected)
+    #   2. k_unit was padded and rotated (Isometrically): k_rot = Rot(pad(k_unit))
+    #   3. Scale = ||k_rot|| / sqrt(D)
+    #   4. Quantized: k_hat_rot = centroids * Scale
+    #   5. Residual (Rotated): r_rot = k_rot - k_hat_rot
+    #   6. QJL Signs: sign_bits = sign(WHT(qjl_signs * r_rot))
     #
-    # For the estimator, we need to transform the query through the same pipeline:
-    #   q_rot = Rot(pad(q))
-    #   q_qjl = WHT(qjl_signs * q_rot)
-    #   <q_qjl, sign_bits> approximates <q_rot, r_rot> * sqrt(2/π) / ||r_rot||
+    # Final Estimator (Isometry):
+    #   <q, k_res> = ||k|| * <q_rot, r_rot>
+    #   ≈ ||k|| * ||r_rot|| * (sqrt(pi/2) / D) * <q_sketch, sign_bits>
     #
-    # The full correction:
-    #   <q, k_residual_original> = ||k|| * <q_rot, r_rot> * (1/D^n)
-    #   where D^n accounts for rotation inverse normalization
-    #   ≈ ||k|| * ||r_rot|| * sqrt(π/2) * <q_qjl, signs> / D / (D^n)
-    #   The D from WHT and D^n from rotation inverse
 
     # Rotate query using quantizer helper
     q_rotated = quantizer.mse_quantizer.transform_query(query)  # (..., block_size)
 
     # Step 2: Apply QJL SRHT to rotated query (same as applied to residual)
-    qjl_signs = quantizer.qjl_signs  # (block_size,)
-    q_signed = apply_sign_array(q_rotated, qjl_signs)
+    qjl_signs_array = quantizer.qjl_signs  # (block_size,)
+    q_signed = apply_sign_array(q_rotated, qjl_signs_array)
     q_qjl_projected = fwht(q_signed)  # (..., n_q, block_size)
 
     # Step 3: Dot with stored sign bits
-    qjl_signs = quantized_key.qjl_signs
+    qjl_signs_packed = quantized_key.qjl_signs
     if quantized_key.packed:
         from ..quant.quantizer import unpack_indices
-        qjl_signs = unpack_indices(qjl_signs, 1, block_size)
+        k_qjl_signs = unpack_indices(qjl_signs_packed, 1, block_size)
+    else:
+        k_qjl_signs = qjl_signs_packed
     
-    sign_float = qjl_signs.float() * 2.0 - 1.0  # (..., n_k, block_size)
+    sign_float = k_qjl_signs.float() * 2.0 - 1.0  # (..., n_k, block_size)
     qjl_dot = torch.matmul(q_qjl_projected, sign_float.transpose(-2, -1).to(q_qjl_projected.dtype))  # (..., n_q, n_k)
 
-    # Step 4: Scale the QJL correction
-    # The residual in rotation domain has norm = residual_norms
-    # The SRHT (sign+WHT) preserves direction info, sign gives 1-bit quantized projection
-    # Expected value of <q_qjl, sign(SRHT(r))> = sqrt(2/π) * <q_qjl, SRHT(r)> / ||SRHT(r)||
-    # = sqrt(2/π) * <q_rot, r_rot> * D / (||r_rot|| * sqrt(D))
-    # (because SRHT preserves inner product up to factor D, and ||SRHT(r)|| = sqrt(D)*||r||)
-    #
-    # So: <q, k> correction = ||k|| * ||r_rot|| * sqrt(π/2) / (D * sqrt(D)) * qjl_dot
-    #                          * (1/D^(n-1)) for rotation inverse scaling
-    #
-    # Simplified: factor = sqrt(π/2) / D^((n+1)/2) / D^(n-1)
-    #           = sqrt(π/2) / D^((3n-1)/2)
-    n_passes = quantizer.mse_quantizer.n_rotation_passes
-    # Rotation inverse scales by 1/D^n (since each ifwht divides by D)
-    # SRHT (sign+WHT) scales inner products by D
-    # So total factor for relating <q_qjl, signs> to <q, residual_original>:
-    qjl_factor = math.sqrt(math.pi / 2.0) / (block_size ** n_passes)
-    residual_norms = quantized_key.residual_norms  # (..., n_k)
-    key_norms = quantized_key.norms  # (..., n_k)
-    d_qjl = residual_norms * key_norms  # (..., n_k)
+    # 1. Orthonormal WHT is isometric: no D^n growth.
+    # 2. QJL bit-sum normalization: 1/sqrt(D) (for orthonormal WHT)
+    # 3. Sign-to-inner-product scale: sqrt(pi/2)
+    qjl_factor = math.sqrt(math.pi / 2.0) / math.sqrt(block_size)
+    
+    # residual_norms is already in FULL domain per mandatory formula.
+    residual_norms = quantized_key.residual_norms
+    d_qjl = residual_norms
 
     scores_qjl = qjl_factor * qjl_dot * d_qjl.unsqueeze(-2)
 
@@ -193,18 +179,22 @@ def attention_score_prod(
         q_rot = q_rot.squeeze(-2) if q_rot.dim() > query.dim() else q_rot
         q_sketch = q_sketch.squeeze(-2) if q_sketch.dim() > query.dim() else q_sketch
         
-        # Calculate correct MSE scale for Triton to undo FWHT growth
-        n_passes = quantizer.mse_quantizer.n_rotation_passes
-        mse_scale_factor = rotation_scale / (block_size ** n_passes)
+        # No energy growth in Triton matmul with orthonormal WHT. 
+        mse_scale = 1.0
+        block_size = quantizer.mse_quantizer.block_size
         
+        # Calculate QJL factor (includes sqrt(pi/2) and D isometry)
+        qjl_factor = math.sqrt(math.pi / 2.0) / math.sqrt(block_size)
+
         # Score calculation in Triton
         scores = turboquant_mse_score(
-            q_rot, quantized_key.mse_indices, quantized_key.norms, centroids, quantizer.mse_bits,
-            mse_scale=mse_scale_factor
+            q_rot, quantized_key.mse_indices, quantized_key.norms, quantized_key.scales,
+            centroids, quantizer.mse_bits,
+            mse_scale=mse_scale
         )
         scores = turboquant_qjl_score(
             q_sketch, quantized_key.qjl_signs, quantized_key.residual_norms, quantized_key.norms, 
-            quantizer.qjl_scale, out=scores
+            qjl_factor, out=scores
         )
         return scores.reshape(*query.shape[:-1], -1) * scale
 

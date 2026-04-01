@@ -199,3 +199,27 @@ def test_prod_better_than_mse_at_same_total_bits():
 
     assert mse_corr.item() > 0.9, f"MSE correlation {mse_corr:.4f} too low"
     assert prod_corr.item() > 0.9, f"Prod correlation {prod_corr:.4f} too low"
+
+
+@pytest.mark.parametrize("bits", range(1, 9))
+def test_bit_perfect_packing(bits):
+    """
+    EXTREME HARDENING: Bit-perfect packing/unpacking test for all depths (1-8 bits).
+    Every possible value must be recovered exactly.
+    """
+    d = 256
+    # Create test indices covering full range [0, 2^bits - 1]
+    n_vals = d
+    max_val = (1 << bits) - 1
+    
+    # Generate random indices within range
+    indices = torch.randint(0, max_val + 1, (2, 4, n_vals), dtype=torch.uint8)
+    
+    # Pack
+    packed = pack_indices(indices, bits)
+    
+    # Unpack
+    unpacked = unpack_indices(packed, bits, n_vals)
+    
+    # Check bit-perfection
+    assert torch.equal(indices, unpacked), f"Bit-packing failed for {bits} bits. Indices lost!"

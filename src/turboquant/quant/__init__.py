@@ -1,7 +1,7 @@
 from .lloyd_max import lloyd_max_quantize, lloyd_max_dequantize
 from .quantizer import (
-    TurboQuantMSE, TurboQuantProd,
-    MSEQuantized, ProdQuantized,
+    TurboQuantMSE, TurboQuantProd, TurboQuantValue,
+    MSEQuantized, ProdQuantized, ValueQuantized,
     pack_indices, unpack_indices,
 )
 
@@ -10,8 +10,8 @@ TurboQuantizer = TurboQuantProd
 
 __all__ = [
     'lloyd_max_quantize', 'lloyd_max_dequantize',
-    'TurboQuantMSE', 'TurboQuantProd',
-    'MSEQuantized', 'ProdQuantized',
+    'TurboQuantMSE', 'TurboQuantProd', 'TurboQuantValue',
+    'MSEQuantized', 'ProdQuantized', 'ValueQuantized',
     'pack_indices', 'unpack_indices',
     'TurboQuantizer',
 ]

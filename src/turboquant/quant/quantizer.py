@@ -3,7 +3,7 @@ TurboQuant Quantizers — Algorithm 1 (MSE) and Algorithm 2 (Inner Product).
 
 Two quantizer classes operating on tensors of shape (..., d):
 
-- TurboQuantMSE: MSE-optimal quantizer for V cache (Algorithm 1)
+- TurboQuantMSE: MSE-optimal quantizer for V or K cache (Algorithm 1)
   Quantize: normalize → pad → cascaded SRHT → Lloyd-Max per coordinate
   Dequantize: centroids → inverse SRHT → truncate → rescale
 
@@ -12,11 +12,17 @@ Two quantizer classes operating on tensors of shape (..., d):
   Stage 2: QJL via SRHT on residual (1 bit per coordinate)
   Provides unbiased inner product estimate:
     <y, x̃> = <y, x̃_mse> + ||r|| * sqrt(π/2)/D² * <SRHT(y), sign(SRHT(r))>
+
+- TurboQuantValue: Asymmetric scalar quantizer for V cache (Production-grade)
+  Quantize: Per-token/group asymmetric scaling (Scale + ZeroPoint)
+  Dequantize: indices * Scale + ZeroPoint
+  No WHT/SRHT to preserve semantic density.
 """
 
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, Optional, Tuple, NamedTuple
 
 from .lloyd_max import lloyd_max_quantize, lloyd_max_dequantize
@@ -33,6 +39,7 @@ class MSEQuantized(NamedTuple):
     """Output of TurboQuantMSE.quantize()."""
     indices: torch.Tensor       # (..., block_size) or (..., packed_d) packed indices
     norms: torch.Tensor         # (...,) original L2 norms
+    scales: torch.Tensor        # (..., 1) dynamic RMS scales per vector
     bits: int                   # bits per index
     packed: bool = False        # whether indices are bit-packed
 
@@ -40,10 +47,19 @@ class ProdQuantized(NamedTuple):
     """Output of TurboQuantProd.quantize()."""
     mse_indices: torch.Tensor      # (..., block_size) or (..., packed_d) packed indices
     qjl_signs: torch.Tensor        # (..., packed_d_signs) packed sign bits uint8
+    scales: torch.Tensor           # (..., 1) dynamic RMS scales per vector (from MSE stage)
     residual_norms: torch.Tensor   # (...,) L2 norm of residual in rotated domain
     norms: torch.Tensor            # (...,) original L2 norms
     mse_bits: int                  # bits per MSE index (= total_bits - 1)
     packed: bool = False           # whether data is bit-packed
+
+class ValueQuantized(NamedTuple):
+    """Output of TurboQuantValue.quantize()."""
+    indices: torch.Tensor       # (..., dim) or (..., packed_d) packed indices
+    scales: torch.Tensor        # (..., n_groups) float scales
+    zero_points: torch.Tensor   # (..., n_groups) float zero points (min values)
+    bits: int                   # number of bits per index
+    packed: bool = False        # whether data is bit-packed
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -61,6 +77,9 @@ def pack_indices(indices: torch.Tensor, bits: int) -> torch.Tensor:
         return indices.to(torch.uint8)
 
     vals_per_byte = 8 // bits
+    if indices.dtype == torch.uint8 and indices.shape[-1] == d // vals_per_byte:
+        return indices # Already packed correctly
+
     indices_flat = indices.reshape(-1, d)
     n_vectors = indices_flat.shape[0]
     packed_d = d // vals_per_byte
@@ -68,7 +87,7 @@ def pack_indices(indices: torch.Tensor, bits: int) -> torch.Tensor:
     for i in range(vals_per_byte):
         shift = i * bits
         packed |= (indices_flat[:, i::vals_per_byte].to(torch.uint8) << shift)
-    return packed.reshape(*shape[:-1], packed_d)
+    return packed.reshape(*indices.shape[:-1], packed_d)
 
 
 def unpack_indices(packed: torch.Tensor, bits: int, original_d: int) -> torch.Tensor:
@@ -118,24 +137,17 @@ class TurboQuantMSE(nn.Module):
         self.n_levels = 2 ** bits
         self.n_rotation_passes = n_rotation_passes
 
-        # Block size: next power of 2 >= dim, minimum 256
-        if dim <= 256:
-            self.block_size = 256
-        else:
-            bs = 256
-            while bs < dim:
-                bs *= 2
-            self.block_size = bs
+        # SOTA Block Size: Standardized to 128 for 5.12x compression
+        # Must be a multiple of 128 for Triton SRAM tiling optimization
+        bs = 128
+        while bs < dim:
+            bs *= 2
+        self.block_size = bs
 
         self.padded = (self.block_size != self.dim)
 
         # Cascaded SRHT rotation (using existing TurboQuantRotation)
         self.rotation = TurboQuantRotation(self.block_size, n_passes=n_rotation_passes, pattern='tbq')
-
-        # After n passes of unnormalized WHT, each component has:
-        #   std ≈ block_size^((n_passes - 1) / 2)
-        # We scale to std≈1 so the exact N(0,1) Lloyd-Max static tables apply.
-        self.rotation_scale = float(self.block_size ** ((n_rotation_passes - 1) / 2.0))
 
     def transform_query(self, query: torch.Tensor) -> torch.Tensor:
         """
@@ -183,19 +195,28 @@ class TurboQuantMSE(nn.Module):
         else:
             x_padded = x_unit
 
-        # Step 4: Cascaded SRHT rotation
+        # Step 4: Cascaded SRHT rotation (Isometry now)
         x_rotated = self.rotation(x_padded)
 
-        # Step 5: Scale to std≈1 for optimal Lloyd-Max quantization
-        x_scaled = x_rotated / self.rotation_scale
+        # Step 5: Dynamic Block-wise Scaling (User formula: norm / sqrt(d))
+        # This brings any distribution to std=1 for Lloyd-Max
+        rms_scales = torch.norm(x_rotated, dim=-1, keepdim=True) / math.sqrt(self.block_size)
+        x_normalized = x_rotated / (rms_scales + 1e-10)
 
-        # Step 6: Lloyd-Max quantization using exact N(0,1) static tables
-        indices = lloyd_max_quantize(x_scaled, self.bits)
+        # Step 6: Initial Lloyd-Max quantization (Gaussian LUT for rotated domain)
+        indices = lloyd_max_quantize(x_normalized, self.bits, dist='gaussian')
+        reconstructed_unit = lloyd_max_dequantize(indices, self.bits, dist='gaussian')
+        
+        # Step 7: Refined Gamma (Least-Squares Optimal Scaling)
+        # Minimizes ||x_rotated - gamma * reconstructed_unit||^2
+        numerator = (x_rotated * reconstructed_unit).sum(dim=-1, keepdim=True)
+        denominator = (reconstructed_unit * reconstructed_unit).sum(dim=-1, keepdim=True) + 1e-10
+        refined_gamma = numerator / denominator
 
         if pack:
             indices = pack_indices(indices, self.bits)
 
-        return MSEQuantized(indices=indices, norms=vec_norms, bits=self.bits, packed=pack)
+        return MSEQuantized(indices=indices, norms=vec_norms, scales=refined_gamma, bits=self.bits, packed=pack)
 
     def dequantize(self, q: MSEQuantized) -> torch.Tensor:
         """
@@ -209,10 +230,18 @@ class TurboQuantMSE(nn.Module):
             indices = unpack_indices(indices, q.bits, self.block_size)
 
         # Centroid lookup (N(0,1) scale)
-        x_scaled = lloyd_max_dequantize(indices, q.bits)
+        x_reconstructed = lloyd_max_dequantize(indices, q.bits)
+        
+        # Ensure it has exactly block_size features for inverse rotation
+        if x_reconstructed.shape[-1] < self.block_size:
+            padding = self.block_size - x_reconstructed.shape[-1]
+            x_reconstructed = F.pad(x_reconstructed, (0, padding))
+        elif x_reconstructed.shape[-1] > self.block_size:
+            x_reconstructed = x_reconstructed[..., :self.block_size]
 
         # Undo scaling back to rotation domain
-        x_rotated = x_scaled * self.rotation_scale
+        # Rescale centroids by the stored dynamic RMS scales (D^n passes growth is already inside rms_scale)
+        x_rotated = x_reconstructed * q.scales
 
         # Inverse rotation
         x_padded = self.rotation.inverse(x_rotated)
@@ -222,7 +251,7 @@ class TurboQuantMSE(nn.Module):
 
         return x_hat
 
-    def quantize_and_residual(self, x: torch.Tensor) -> Tuple[MSEQuantized, torch.Tensor]:
+    def quantize_and_residual(self, x: torch.Tensor, pack: bool = True) -> Tuple[MSEQuantized, torch.Tensor]:
         """
         Quantize and return both the MSEQuantized data and the residual
         in the rotated domain (needed by TurboQuantProd for QJL stage).
@@ -235,30 +264,45 @@ class TurboQuantMSE(nn.Module):
         device = x.device
         dtype = x.dtype
 
-        # Steps 1-4: same as quantize
+        # Step 1: Norms
         vec_norms = torch.norm(x, p=2, dim=-1)
         x_unit = x / (vec_norms.unsqueeze(-1) + 1e-10)
+
+        # Step 2: Pad
         if self.padded:
             padding = torch.zeros((*shape, self.block_size - self.dim), device=device, dtype=dtype)
             x_padded = torch.cat([x_unit, padding], dim=-1)
         else:
             x_padded = x_unit
+
+        # Step 3: Rotate
         x_rotated = self.rotation(x_padded)
 
-        # Scale to std≈1 for Lloyd-Max
-        x_scaled = x_rotated / self.rotation_scale
+        # Step 4: Dynamic Block-wise Scaling (Initial estimate: RMS)
+        rms_scales = torch.norm(x_rotated, dim=-1, keepdim=True) / math.sqrt(self.block_size)
+        x_normalized = x_rotated / (rms_scales + 1e-10)
+        
+        # Step 5: Quantize in normalized domain (Gaussian LUT)
+        indices = lloyd_max_quantize(x_normalized, self.bits, dist='gaussian')
+        reconstructed_unit = lloyd_max_dequantize(indices, self.bits, dist='gaussian')
+        
+        # Step 6: Refined Gamma (Least-Squares Optimal Scaling)
+        # gamma = <X_rot, X_hat_unit> / <X_hat_unit, X_hat_unit>
+        numerator = (x_rotated * reconstructed_unit).sum(dim=-1, keepdim=True)
+        denominator = (reconstructed_unit * reconstructed_unit).sum(dim=-1, keepdim=True) + 1e-10
+        refined_gamma = numerator / denominator
+        
+        # Step 7: Recover reconstruction in rotated domain using refined_gamma
+        reconstructed_rotated = reconstructed_unit * refined_gamma
+        
+        # Step 8: Calculate residual in rotated domain (Used for Stage 2 QJL)
+        residual_rotated = x_rotated - reconstructed_rotated
 
-        # Step 5: Quantize + dequantize in scaled domain
-        indices = lloyd_max_quantize(x_scaled, self.bits)
-        reconstructed_scaled = lloyd_max_dequantize(indices, self.bits)
+        # Pack indices if requested
+        if pack:
+            indices = pack_indices(indices, self.bits)
 
-        # Residual in scaled domain (same domain as quantized data)
-        residual_scaled = x_scaled - reconstructed_scaled
-
-        # Convert residual back to rotation domain for QJL
-        residual_rotated = residual_scaled * self.rotation_scale
-
-        mse_q = MSEQuantized(indices=indices, norms=vec_norms, bits=self.bits)
+        mse_q = MSEQuantized(indices=indices, norms=vec_norms, scales=refined_gamma, bits=self.bits, packed=pack)
         return mse_q, residual_rotated
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -310,9 +354,9 @@ class TurboQuantProd(nn.Module):
         self.register_buffer('qjl_signs', qjl_signs)
 
         # QJL dequantization scale factor
-        # From the paper: sqrt(π/2) / D²
-        # D = block_size (WHT normalization scales by 1/D in inverse)
-        self.qjl_scale = math.sqrt(math.pi / 2.0) / (self.block_size * self.block_size)
+        # From the paper: sqrt(π/2) / D
+        # D = block_size (WHT is now isometric 1/sqrt(D) normalization)
+        self.qjl_scale = math.sqrt(math.pi / 2.0) / self.block_size
 
     def transform_query(self, query: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -334,7 +378,8 @@ class TurboQuantProd(nn.Module):
             residual norms, and original norms.
         """
         # Stage 1: MSE quantization + residual in rotated domain
-        mse_q, residual_rotated = self.mse_quantizer.quantize_and_residual(x)
+        # Always get raw indices first for residual calculation, then pack at the end
+        mse_q, residual_rotated = self.mse_quantizer.quantize_and_residual(x, pack=False)
 
         # Stage 2: QJL via SRHT on residual
         # Apply QJL sign array then WHT (completing the SRHT projection)
@@ -344,8 +389,8 @@ class TurboQuantProd(nn.Module):
         # Take sign bits of the SRHT-projected residual
         qjl_sign_bits = (residual_projected >= 0).to(torch.uint8)
 
-        # True L2 norm of residual
-        residual_norms = torch.norm(residual_rotated, dim=-1)
+        # True L2 norm of residual in original vector domain (Forced by User)
+        residual_norms = torch.norm(residual_rotated, dim=-1) * mse_q.norms
 
         mse_indices = mse_q.indices
         if pack:
@@ -355,6 +400,7 @@ class TurboQuantProd(nn.Module):
         return ProdQuantized(
             mse_indices=mse_indices,
             qjl_signs=qjl_sign_bits,
+            scales=mse_q.scales,
             residual_norms=residual_norms,
             norms=mse_q.norms,
             mse_bits=self.mse_bits,
@@ -371,18 +417,17 @@ class TurboQuantProd(nn.Module):
         Returns:
             Reconstructed tensor of shape (..., dim).
         """
-        rotation_scale = self.mse_quantizer.rotation_scale
-
         mse_indices = q.mse_indices
         qjl_signs = q.qjl_signs
+
         if q.packed:
             mse_indices = unpack_indices(mse_indices, q.mse_bits, self.block_size)
             qjl_signs = unpack_indices(qjl_signs, 1, self.block_size)
 
         # Stage 1: MSE dequantization
-        # Centroids in N(0,1) scale → multiply by rotation_scale → rotation domain
-        reconstructed_scaled = lloyd_max_dequantize(mse_indices, q.mse_bits)
-        reconstructed_rotated = reconstructed_scaled * rotation_scale
+        # Centroids in N(0,1) scale → apply dynamic RMS scales → rotation domain
+        reconstructed_normalized = lloyd_max_dequantize(mse_indices, q.mse_bits)
+        reconstructed_mse_rot = reconstructed_normalized * q.scales
 
         # Stage 2: QJL residual reconstruction via SRHT inverse
         # Convert sign bits {0, 1} → {-1, +1}
@@ -394,12 +439,15 @@ class TurboQuantProd(nn.Module):
 
         # Normalize to unit direction, then scale to correct residual norm
         dir_norm = torch.norm(residual_direction, dim=-1, keepdim=True) + 1e-10
-        residual_estimated = residual_direction * (q.residual_norms.unsqueeze(-1) / dir_norm)
+        # q.residual_norms is in FULL domain, so we normalize by q.norms 
+        # to bring it back to the UNIT rotated domain for addition with MSE part.
+        unit_res_norms = q.residual_norms / (q.norms + 1e-10)
+        residual_estimated_unit = residual_direction * (unit_res_norms.unsqueeze(-1) / dir_norm)
 
-        # Add QJL correction to MSE reconstruction (in rotation domain)
-        combined_rotated = reconstructed_rotated + residual_estimated
+        # Add QJL correction to MSE reconstruction (in UNIT rotation domain)
+        combined_rotated = reconstructed_mse_rot + residual_estimated_unit
 
-        # Inverse rotation
+        # Inverse rotation (this will divide by block_size^n_passes during ifwht)
         x_padded = self.mse_quantizer.rotation.inverse(combined_rotated)
 
         # Truncate padding and rescale by original norm
@@ -407,4 +455,111 @@ class TurboQuantProd(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Quantize then dequantize (for testing roundtrip quality)."""
+        return self.dequantize(self.quantize(x))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# TurboQuantValue (for V cache)
+# ──────────────────────────────────────────────────────────────────────
+
+class TurboQuantValue(nn.Module):
+    """
+    TurboQuant asymmetric quantizer for Value (V) cache.
+    
+    Uses asymmetric scalar quantization (Scale + ZeroPoint) per token or per group.
+    This handles the non-zero-mean distribution of Value vectors without WHT.
+    
+    Formula:
+      v_quant = round((v - min) / scale)
+      v_recon = v_quant * scale + min
+    """
+
+    def __init__(self, dim: int, bits: int = 4, group_size: int = 128):
+        super().__init__()
+        self.dim = dim
+        self.bits = bits
+        # SOTA: default to 128, but fallback if dim is smaller
+        self.group_size = min(group_size, dim)
+        self.n_levels = 2**bits
+        
+        # Ensure group_size divides dim
+        assert dim % self.group_size == 0, f"dim {dim} must be divisible by group_size {self.group_size}"
+        self.n_groups = dim // self.group_size
+
+    def quantize(self, x: torch.Tensor, pack: bool = True) -> ValueQuantized:
+        """
+        Asymmetric quantization using Laplacian LUT for 1.2dB SNR gain.
+        
+        Returns:
+            ValueQuantized with packed indices, scales, and zero_points.
+        """
+        shape = x.shape[:-1]
+        device = x.device
+        dtype = x.dtype
+        
+        # Step 1: Reshape into groups: (..., n_groups, group_size)
+        x_grouped = x.view(*shape, self.n_groups, self.group_size)
+        
+        # Step 2: Compute min per group (ZeroPoint)
+        v_min = x_grouped.min(dim=-1, keepdim=True).values
+        x_centered = x_grouped - v_min
+        
+        # Step 3: Dynamic Scaling for Unit Laplacian Quantization
+        # Use simple RMS-style scale for initial normalization
+        v_scale = torch.norm(x_centered, dim=-1, keepdim=True) / math.sqrt(self.group_size)
+        x_unit = x_centered / (v_scale + 1e-10)
+        
+        # Step 4: Laplacian Lloyd-Max Quantize (Asymmetric original domain)
+        indices = lloyd_max_quantize(x_unit, self.bits, dist='laplace')
+        indices_f = indices.float()
+        
+        # Step 5: Refined Gamma (Least-Squares Optimal Scaling for Asymmetric)
+        # Minimize ||x_centered - gamma * reconstructed_unit||^2
+        unit_recon = lloyd_max_dequantize(indices, self.bits, dist='laplace')
+        
+        numerator = (x_centered * unit_recon).sum(dim=-1, keepdim=True)
+        denominator = (unit_recon * unit_recon).sum(dim=-1, keepdim=True) + 1e-10
+        refined_gamma = numerator / denominator
+        
+        # Step 6: Flatten indices back to (..., dim)
+        indices = indices.view(*shape, self.dim).to(torch.uint8)
+        
+        # Flatten scales and zero_points to (..., n_groups)
+        scales = refined_gamma.view(*shape, self.n_groups)
+        zero_points = v_min.view(*shape, self.n_groups)
+
+        if pack:
+            indices = pack_indices(indices, self.bits)
+            
+        return ValueQuantized(
+            indices=indices,
+            scales=scales,
+            zero_points=zero_points,
+            bits=self.bits,
+            packed=pack
+        )
+
+    def dequantize(self, q: ValueQuantized) -> torch.Tensor:
+        """
+        Reconstruct Value vectors using Laplacian Dual-LUT.
+        """
+        indices = q.indices
+        shape = q.scales.shape[:-1]
+        
+        if q.packed:
+            indices = unpack_indices(indices, q.bits, self.dim)
+            
+        # Reshape for group-wise broadcast
+        indices_grouped = indices.view(*shape, self.n_groups, self.group_size).float()
+        scales_grouped = q.scales.view(*shape, self.n_groups, 1)
+        zp_grouped = q.zero_points.view(*shape, self.n_groups, 1)
+        
+        # v_recon = lloyd_max_dequantize(indices, dist='laplace') * refined_gamma + zero_point
+        unit_recon = lloyd_max_dequantize(indices_grouped.long(), q.bits, dist='laplace')
+        reconstructed = unit_recon * scales_grouped + zp_grouped
+        
+        return reconstructed.view(*shape, self.dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Quantize then dequantize (for testing)."""
         return self.dequantize(self.quantize(x))

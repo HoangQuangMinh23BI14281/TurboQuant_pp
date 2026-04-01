@@ -3,59 +3,62 @@ import pytest
 import math
 from turboquant.ops.wht import fwht, ifwht, generate_hadamard
 
-@pytest.mark.parametrize("d", [64, 128, 256])
+@pytest.mark.parametrize("d", [64, 128, 256, 512])
 def test_orthogonality(d):
     """
-    Check if the generate_hadamard(normalized=True) creates an orthonormal matrix.
-    H @ H.T should be identity.
+    EXTREME HARDENING: Check if generate_hadamard(normalized=True) is bit-perfect orthonormal.
+    H @ H.T must be identity at double precision (1e-15).
     """
-    H = generate_hadamard(d, normalized=True)
-    I = torch.eye(d)
+    H = generate_hadamard(d, normalized=True).double()
+    I = torch.eye(d, dtype=torch.float64, device=H.device)
     
-    # H * H^T
     HHT = torch.matmul(H, H.t())
-    torch.testing.assert_close(HHT, I, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(HHT, I, rtol=1e-15, atol=1e-15)
 
 @pytest.mark.parametrize("d", [64, 128, 256])
 def test_fwht_vs_naive(d):
     """
-    FWHT should produce the same result as matrix multiplication with raw Hadamard matrix.
-    Matching llama.cpp scaling: fwht(x) == x @ H (non-normalized).
+    EXTREME HARDENING: FWHT vs Naive Matmul at double precision.
+    The butterfly logic must match naive multiplication EXACTLY (1e-15).
     """
-    H = generate_hadamard(d, normalized=False).double()
+    H = generate_hadamard(d, normalized=True).double()
     x = torch.randn(2, 3, d).double()
     
-    # FWHT(x)
     x_fwht = fwht(x)
-    
-    # Naive multiplication: x @ H (H is symmetric, H.t() == H)
     x_naive = torch.matmul(x, H.t())
     
-    # At double precision, the butterfly logic matches naive multiplication exactly
-    torch.testing.assert_close(x_fwht, x_naive, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(x_fwht, x_naive, rtol=1e-15, atol=1e-15)
 
 @pytest.mark.parametrize("d", [64, 128, 256])
 def test_roundtrip(d):
     """
-    ifwht(fwht(x)) should return x.
+    EXTREME HARDENING: ifwht(fwht(x)) roundtrip at double precision (1e-15).
     """
-    x = torch.randn(4, d)
-    x_fwht = fwht(x)
-    x_roundtrip = ifwht(x_fwht)
+    x = torch.randn(4, d).double()
+    x_roundtrip = ifwht(fwht(x))
     
-    torch.testing.assert_close(x, x_roundtrip, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(x, x_roundtrip, rtol=1e-15, atol=1e-15)
 
 @pytest.mark.parametrize("d", [64, 128, 256])
 def test_norm_preservation(d):
     """
-    For non-normalized WHT, the L2 norm grows by sqrt(d).
-    ||fwht(x)|| = sqrt(d) * ||x||
+    EXTREME HARDENING: Isometry check at double precision.
+    ||fwht(x)|| must equal ||x|| within machine epsilon (1e-15).
     """
-    x = torch.randn(10, d)
+    x = torch.randn(10, d).double()
     norm_orig = torch.norm(x, p=2, dim=-1)
+    norm_fwht = torch.norm(fwht(x), p=2, dim=-1)
     
-    x_fwht = fwht(x)
-    norm_fwht = torch.norm(x_fwht, p=2, dim=-1)
+    torch.testing.assert_close(norm_fwht, norm_orig, rtol=1e-15, atol=1e-15)
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_dtype_preservation(dtype):
+    """
+    EXTREME HARDENING: FWHT must preserve input dtype (No silent casts).
+    """
+    x = torch.randn(4, 64, dtype=dtype)
+    out = fwht(x)
+    assert out.dtype == dtype
     
-    # Expected norm: norm_orig * sqrt(d)
-    torch.testing.assert_close(norm_fwht, norm_orig * math.sqrt(float(d)), rtol=1e-6, atol=1e-6)
+    out_inv = ifwht(out)
+    assert out_inv.dtype == dtype

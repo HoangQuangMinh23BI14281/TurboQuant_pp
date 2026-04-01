@@ -156,6 +156,10 @@ def gaussian_sf(x: torch.Tensor, sigma: float = 1.0) -> torch.Tensor:
 def gaussian_ppf(q: torch.Tensor, sigma: float = 1.0) -> torch.Tensor:
     return (sigma * math.sqrt(2)) * torch.erfinv(2 * q - 1)
 
+def laplace_ppf(q: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    """PPF of Laplace distribution: F^-1(q) = -b * sgn(q-0.5) * ln(1 - 2|q-0.5|)"""
+    return -scale * torch.sign(q - 0.5) * torch.log(1 - 2 * torch.abs(q - 0.5))
+
 def _gaussian_conditional_expectation(a: float, b: float, sigma: float = 1.0) -> float:
     a_st = a / sigma if math.isfinite(a) else a
     b_st = b / sigma if math.isfinite(b) else b
@@ -171,49 +175,99 @@ def _gaussian_conditional_expectation(a: float, b: float, sigma: float = 1.0) ->
     pdf_b = (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * b_st**2) if math.isfinite(b_st) else 0.0
     return sigma * (pdf_a - pdf_b) / prob
 
+def _laplace_conditional_expectation(a: float, b: float, b_param: float = 1.0) -> float:
+    """E[X | a < X < b] for X ~ Laplace(0, b_param)"""
+    # Safety: ensure finite bounds for math.exp
+    a = max(-700 * b_param, min(700 * b_param, a))
+    b = max(-700 * b_param, min(700 * b_param, b))
+
+    def anti_xf(x):
+        if x >= 0: return -0.5 * math.exp(-x / b_param) * (x + b_param)
+        else: return 0.5 * math.exp(x / b_param) * (x - b_param)
+    
+    def cdf(x):
+        if x >= 0: return 1.0 - 0.5 * math.exp(-x / b_param)
+        else: return 0.5 * math.exp(x / b_param)
+    
+    prob = cdf(b) - cdf(a)
+    if prob < 1e-18: 
+        if math.isinf(a): return b - b_param
+        if math.isinf(b): return a + b_param
+        return (a + b) / 2.0
+    return (anti_xf(b) - anti_xf(a)) / prob
+
 # ──────────────────────────────────────────────────────────────────────
 # Stable Solver and APIs
 # ──────────────────────────────────────────────────────────────────────
 
 _CODEBOOK_CACHE = {}
 
-def compute_lloyd_max_codebook(bits: int, d: int = 1, max_iter: int = 30) -> Dict:
-    cache_key = (int(bits), int(d))
+def compute_lloyd_max_codebook(bits: int, d: int = 1, dist: str = 'gaussian', max_iter: int = 40) -> Dict:
+    """
+    Compute optimal Lloyd-Max centroids/boundaries for a given distribution.
+    - 'gaussian': used for Key cache (rotated domain follows N(0, 1/d)).
+    - 'laplace': used for Value cache (asymmetric original domain).
+    """
+    cache_key = (int(bits), int(d), dist)
     if cache_key in _CODEBOOK_CACHE:
         return _CODEBOOK_CACHE[cache_key]
 
-    sigma = 1.0 / math.sqrt(d)
+    # BIN count and quantiles
+    n = 1 << bits
+    q = torch.linspace(1e-5, 1-1e-5, n + 1, dtype=torch.float32, device='cpu')[1:-1]
     
-    # Use static llama.cpp N(0, 1) tables if d=1
-    if d == 1 and bits in LM_BOUNDARIES and bits in LM_CENTROIDS:
-        cb = {'centroids': LM_CENTROIDS[bits].clone().float(), 
-              'boundaries': LM_BOUNDARIES[bits].clone().float()}
+    if dist == 'gaussian':
+        sigma_or_b = 1.0 / math.sqrt(d)
+        ppf_fn = gaussian_ppf
+        expectation_fn = _gaussian_conditional_expectation
+        
+        # Optimization: Use static llama.cpp N(0, 1) tables if d=1 and gaussian
+        if d == 1 and bits in LM_BOUNDARIES and bits in LM_CENTROIDS:
+            cb = {
+                'centroids': LM_CENTROIDS[bits].clone().float(), 
+                'boundaries': LM_BOUNDARIES[bits].clone().float()
+            }
+            _CODEBOOK_CACHE[cache_key] = cb
+            return cb
+            
+    elif dist == 'laplace':
+        # For Laplace(0, b), variance is 2*b^2. 
+        # To match Gaussian variance (1/d), we need b = 1/sqrt(2d)
+        sigma_or_b = 1.0 / math.sqrt(2 * d)
+        ppf_fn = laplace_ppf
+        expectation_fn = _laplace_conditional_expectation
     else:
-        # Solver for custom dimensions (or bits not in static table)
-        n = 1 << bits
-        q = torch.linspace(1e-5, 1-1e-5, n + 1, dtype=torch.float32)[1:-1]
-        boundaries = gaussian_ppf(q, sigma).numpy().tolist()
-        centroids = np.zeros(n)
-        for _ in range(max_iter):
-            bounds = [-float('inf')] + list(boundaries) + [float('inf')]
-            for i in range(n):
-                centroids[i] = _gaussian_conditional_expectation(bounds[i], bounds[i+1], sigma)
-            new_b = (centroids[:-1] + centroids[1:]) / 2.0
-            if np.allclose(boundaries, new_b, atol=1e-8): break
-            boundaries = new_b.tolist()
-        cb = {'centroids': torch.tensor(np.sort(centroids), dtype=torch.float32),
-              'boundaries': torch.tensor(boundaries, dtype=torch.float32)}
+        raise ValueError(f"Unsupported distribution: {dist}")
+
+    # Initial boundaries using PPF of targets
+    boundaries = ppf_fn(q, sigma_or_b).numpy().tolist()
+    centroids = np.zeros(n)
+    
+    for _ in range(max_iter):
+        bounds = [-float('inf')] + list(boundaries) + [float('inf')]
+        for i in range(n):
+            centroids[i] = expectation_fn(bounds[i], bounds[i+1], sigma_or_b)
+        
+        new_b = (centroids[:-1] + centroids[1:]) / 2.0
+        if np.allclose(boundaries, new_b, atol=1e-8):
+            break
+        boundaries = new_b.tolist()
+    
+    cb = {
+        'centroids': torch.tensor(np.sort(centroids), dtype=torch.float32),
+        'boundaries': torch.tensor(boundaries, dtype=torch.float32)
+    }
 
     _CODEBOOK_CACHE[cache_key] = cb
     return cb
 
-def lloyd_max_quantize(x: torch.Tensor, bits: int, d: Optional[int] = None) -> torch.Tensor:
-    cb = compute_lloyd_max_codebook(int(bits), d=(d if d else 1))
+def lloyd_max_quantize(x: torch.Tensor, bits: int, d: Optional[int] = None, dist: str = 'gaussian') -> torch.Tensor:
+    cb = compute_lloyd_max_codebook(int(bits), d=(d if d else 1), dist=dist)
     bounds = cb['boundaries'].to(x.device, x.dtype)
-    indices = torch.bucketize(x, bounds)
+    indices = torch.bucketize(x.contiguous(), bounds)
     return indices.clamp(0, (1 << int(bits)) - 1).long()
 
-def lloyd_max_dequantize(indices: torch.Tensor, bits: int, d: Optional[int] = None) -> torch.Tensor:
-    cb = compute_lloyd_max_codebook(int(bits), d=(d if d else 1))
+def lloyd_max_dequantize(indices: torch.Tensor, bits: int, d: Optional[int] = None, dist: str = 'gaussian') -> torch.Tensor:
+    cb = compute_lloyd_max_codebook(int(bits), d=(d if d else 1), dist=dist)
     centroids = cb['centroids'].to(indices.device).view(-1)
     return centroids[indices.long().clamp(0, (1 << int(bits)) - 1).contiguous()]

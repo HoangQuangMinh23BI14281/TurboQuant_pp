@@ -2,42 +2,37 @@ import torch
 import pytest
 from turboquant.ops.rotation import TurboQuantRotation
 
-@pytest.mark.parametrize("d", [64, 128, 256])
+@pytest.mark.parametrize("d", [64, 128, 256, 1024])
 @pytest.mark.parametrize("n_passes", [1, 2, 3])
 def test_cascaded_rotation_properties(d, n_passes):
     """
-    Verify that multi-pass Cascaded WHT preserves orthogonality and norm.
+    EXTREME HARDENING: Verify that multi-pass Cascaded WHT preserves norm exactly (Isometry).
+    ||rot(x)|| / ||x|| must be EXACTLY 1.0 at double precision.
     """
-    rot = TurboQuantRotation(d, n_passes=n_passes)
-    x = torch.randn(2, d)
+    rot = TurboQuantRotation(d, n_passes=n_passes).double()
+    x = torch.randn(2, d).double()
     
-    # 1. Norm preservation: ||H(S(x))|| == sqrt(d) * ||x|| if H is not normalized
-    # But our fwht/ifwht should ideally handle scaling or we check relative norm.
     x_rot = rot(x)
-    
-    # Standard WHT: ||H(x)|| = sqrt(d) * ||x||
-    # 2-pass WHT: ||H(S2(H(S1(x))))|| = d * ||x||
-    expected_scale = d ** (n_passes / 2.0)
     
     norm_in = torch.norm(x, p=2, dim=-1)
     norm_out = torch.norm(x_rot, p=2, dim=-1)
     
-    # We check if (norm_out / norm_in) is constant and match expected_scale
-    torch.testing.assert_close(norm_out / norm_in, torch.full_like(norm_in, expected_scale), rtol=1e-5, atol=1e-5)
+    # Orthonormal WHT is isometric: expected_ratio = 1.0
+    torch.testing.assert_close(norm_out, norm_in, rtol=1e-15, atol=1e-15)
 
-@pytest.mark.parametrize("d", [64, 128])
+@pytest.mark.parametrize("d", [64, 128, 256])
 @pytest.mark.parametrize("n_passes", [1, 2])
 def test_cascaded_rotation_roundtrip(d, n_passes):
     """
-    Verify x == rot.inverse(rot(x))
+    EXTREME HARDENING: Verify x == rot.inverse(rot(x)) at double precision.
     """
-    rot = TurboQuantRotation(d, n_passes=n_passes)
-    x = torch.randn(4, d)
+    rot = TurboQuantRotation(d, n_passes=n_passes).double()
+    x = torch.randn(4, d).double()
     
     x_rot = rot(x)
     x_recon = rot.inverse(x_rot)
     
-    torch.testing.assert_close(x, x_recon, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(x, x_recon, rtol=1e-15, atol=1e-15)
 
 def test_cascaded_independence():
     """

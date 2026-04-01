@@ -11,19 +11,16 @@ from typing import Optional
 @triton.jit
 def _turboquant_mse_score_kernel(
     # Pointers
-    Q_ptr,          # (BH, D) query vectors (already rotated: q @ Pi^T)
-    MSE_ptr,        # (BH, N, packed_d) bit-packed indices
-    NORMS_ptr,      # (BH, N) original norms
-    CENTROIDS_ptr,  # (n_clusters,) codebook
-    OUT_ptr,        # (BH, N) output scores
+    Q_ptr, MSE_ptr, NORMS_ptr, SCALES_ptr, CENTROIDS_ptr, OUT_ptr,
     # Strides
     stride_q_bh, stride_q_d,
     stride_m_bh, stride_m_n, stride_m_d,
     stride_n_bh, stride_n_n,
+    stride_s_bh, stride_s_n,
     stride_o_bh, stride_o_n,
-    # Dims
-    BH, N, D,
-    PACKED_D,
+    # Shapes
+    BH, N, D, PACKED_D, 
+    NQ,  # Number of queries per key-cache head
     MSE_SCALE,
     BITS: tl.constexpr,
     VALS_PER_BYTE: tl.constexpr,
@@ -33,40 +30,37 @@ def _turboquant_mse_score_kernel(
     pid_bh = tl.program_id(0)
     pid_n = tl.program_id(1)
 
+    # Decouple query index from key index
+    # Each key_bh_idx head has NQ queries associated with it
+    key_bh_idx = pid_bh // NQ
+
     n_start = pid_n * BLOCK_N
     n_offs = n_start + tl.arange(0, BLOCK_N)
     n_mask = n_offs < N
 
     BIT_MASK: tl.constexpr = (1 << BITS) - 1
 
-    # Accumulate dot product: q_rot[j] * centroid[idx[j]]
+    # Accumulate dot product
     dot = tl.zeros([BLOCK_N], dtype=tl.float32)
 
     for byte_idx in range(PACKED_D):
-        # Load packed index byte for this block: (BLOCK_N,)
         packed = tl.load(
-            MSE_ptr + pid_bh * stride_m_bh + n_offs * stride_m_n + byte_idx * stride_m_d,
+            MSE_ptr + key_bh_idx * stride_m_bh + n_offs * stride_m_n + byte_idx * stride_m_d,
             mask=n_mask, other=0
         ).to(tl.int32)
 
-        # Extract values from byte
         for sub in range(VALS_PER_BYTE):
             coord_idx = byte_idx * VALS_PER_BYTE + sub
             if coord_idx < D:
-                # Extract bit-field
                 idx = (packed >> (sub * BITS)) & BIT_MASK
-                # Load centroid
                 centroid_val = tl.load(CENTROIDS_ptr + idx)
-                # Load query coord
                 q_val = tl.load(Q_ptr + pid_bh * stride_q_bh + coord_idx * stride_q_d).to(tl.float32)
-                # Dot
                 dot += q_val * centroid_val
 
-    # Scale by original L2 norms and MSE scaling factor
-    norms = tl.load(NORMS_ptr + pid_bh * stride_n_bh + n_offs * stride_n_n, mask=n_mask, other=0.0).to(tl.float32)
-    scores = dot * norms * MSE_SCALE
+    norms = tl.load(NORMS_ptr + key_bh_idx * stride_n_bh + n_offs * stride_n_n, mask=n_mask, other=0.0).to(tl.float32)
+    scales = tl.load(SCALES_ptr + key_bh_idx * stride_s_bh + n_offs * stride_s_n, mask=n_mask, other=1.0).to(tl.float32)
 
-    # Store
+    scores = dot * norms * scales * MSE_SCALE
     tl.store(OUT_ptr + pid_bh * stride_o_bh + n_offs * stride_o_n, scores, mask=n_mask)
 
 
@@ -126,8 +120,8 @@ def _turboquant_qjl_score_kernel(
 
     # Scale by residual norms, key norms, and QJL factor
     res_norms = tl.load(RES_NORMS_ptr + pid_bh * stride_rn_bh + n_offs * stride_rn_n, mask=n_mask, other=0.0).to(tl.float32)
-    key_norms = tl.load(NORMS_ptr + pid_bh * stride_n_bh + n_offs * stride_n_n, mask=n_mask, other=0.0).to(tl.float32)
-    qjl_scores = dot * res_norms * key_norms * QJL_SCALE
+    # res_norms ALREADY contains full-domain magnitude (norm * key_norm) per mandatory formula.
+    qjl_scores = dot * res_norms * QJL_SCALE
 
     # Add to existing scores
     existing = tl.load(OUT_ptr + pid_bh * stride_o_bh + n_offs * stride_o_n, mask=n_mask, other=0.0)
@@ -152,6 +146,7 @@ def turboquant_mse_score(
     query_rot: torch.Tensor,
     mse_packed: torch.Tensor,
     norms: torch.Tensor,
+    scales: torch.Tensor,
     centroids: torch.Tensor,
     mse_bits: int,
     mse_scale: float = 1.0,  # rotation_scale / (D^n_passes)
@@ -169,9 +164,14 @@ def turboquant_mse_score(
     # Ensure 2D (BH, N)
     if norms.dim() == 1:
         norms = norms.unsqueeze(0)
+    if scales.dim() == 1:
+        scales = scales.unsqueeze(0)
 
     BH, D = query_rot.shape
     N = mse_packed.shape[1]
+    BH_keys = mse_packed.shape[0]
+    NQ = BH // BH_keys
+    
     packed_d = mse_packed.shape[2]
     eff_bits, vals_per_byte = _get_packing_params(mse_bits)
 
@@ -180,12 +180,13 @@ def turboquant_mse_score(
     grid = (BH, triton.cdiv(N, BLOCK_N))
 
     _turboquant_mse_score_kernel[grid](
-        query_rot, mse_packed, norms, centroids, out,
+        query_rot, mse_packed, norms, scales, centroids, out,
         query_rot.stride(0), query_rot.stride(1),
         mse_packed.stride(0), mse_packed.stride(1), mse_packed.stride(2),
         norms.stride(0), norms.stride(1),
+        scales.stride(0), scales.stride(1),
         out.stride(0), out.stride(1),
-        BH, N, D, packed_d, mse_scale,
+        BH, N, D, packed_d, NQ, mse_scale,
         BITS=eff_bits, VALS_PER_BYTE=vals_per_byte,
         BLOCK_N=BLOCK_N
     )
@@ -217,6 +218,9 @@ def turboquant_qjl_score(
 
     BH, D = q_sketched.shape
     N = qjl_signs.shape[1]
+    BH_keys = qjl_signs.shape[0]
+    NQ = BH // BH_keys
+    
     packed_d_signs = qjl_signs.shape[2]
 
     if out is None:
@@ -232,7 +236,7 @@ def turboquant_qjl_score(
         residual_norms.stride(0), residual_norms.stride(1),
         norms.stride(0), norms.stride(1),
         out.stride(0), out.stride(1),
-        N=N, D=D, PACKED_D_SIGNS=packed_d_signs,
+        N=N, D=D, PACKED_D_SIGNS=packed_d_signs, NQ=NQ,
         QJL_SCALE=qjl_scale,
         BLOCK_N=BLOCK_N
     )

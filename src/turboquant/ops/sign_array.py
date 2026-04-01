@@ -45,4 +45,7 @@ def apply_sign_array(x: torch.Tensor, signs: torch.Tensor) -> torch.Tensor:
     """
     Element-wise multiply x by signs along the last dimension.
     """
-    return x * signs.to(x.device, dtype=x.dtype)
+    # Robust broadcasting for any number of leading dimensions
+    s = signs.to(x.device, dtype=x.dtype)
+    s = s.view(*((1,) * (x.dim() - 1)), -1)
+    return x * s

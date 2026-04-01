@@ -18,7 +18,7 @@ true_scores = (query @ key.T) * scale
 
 # MSE-only scores (Term 1)
 quantized = q.quantize(key)
-mse_q = MSEQuantized(indices=quantized.mse_indices, norms=quantized.norms, bits=quantized.mse_bits)
+mse_q = MSEQuantized(indices=quantized.mse_indices, norms=quantized.norms, scales=quantized.scales, bits=quantized.mse_bits, packed=quantized.packed)
 keys_mse = q.mse_quantizer.dequantize(mse_q)
 scores_mse = (query @ keys_mse.T) * scale
 
@@ -39,7 +39,6 @@ print(f"QJL correction range: [{qjl_correction.min():.4f}, {qjl_correction.max()
 print(f"QJL correction abs mean: {qjl_correction.abs().mean():.6f}")
 print(f"MSE scores abs mean: {scores_mse.abs().mean():.6f}")
 print(f"QJL/MSE ratio: {qjl_correction.abs().mean() / scores_mse.abs().mean():.4f}")
-print(f"rotation_scale: {q.mse_quantizer.rotation_scale}")
 print(f"block_size: {q.block_size}")
 print(f"n_passes: {q.mse_quantizer.n_rotation_passes}")
 print(f"residual_norms mean: {quantized.residual_norms.mean():.6f}")
