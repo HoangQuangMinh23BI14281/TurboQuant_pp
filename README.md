@@ -96,3 +96,10 @@ Hợp nhất (Fuse) toàn bộ quy trình trên vào một nhân (Kernel) CUDA/T
 5. **Sparse V Trigger:** Kiểm tra $P_i > 10^{-6}$.
 6. **Dequantize $V$:** Nếu thỏa mãn, đọc chỉ mục LUT Value từ VRAM, tra bảng $LUT_V$ để lấy $V_{restored}$.
 7. **Accumulate:** Tính tổng trọng số $O += P_i \cdot V_{restored}$ và xả (store) kết quả cuối cùng ra VRAM.
+
+
+
+rsync -a --exclude='.venv' --exclude='__pycache__' /mnt/c/Users/ADMIN/OneDrive/Desktop/turboquant_pp/ ~/projects/turboquant_pp/
+cd ~/projects/turboquant_pp
+uv sync
+uv run python -m pytest -v
