@@ -13,6 +13,7 @@ def _turboquant_fused_decode_kernel(
     SIGNS_ptr,       # (BH, N, packed_d_signs)
     NORMS_ptr,       # (BH, N)
     RES_NORMS_ptr,   # (BH, N)
+    SCALES_ptr,      # (BH, N) - Added for refinement
     CENTROIDS_ptr,   # (n_clusters,)
     # Values (group-quantized & packed)
     V_DATA_ptr,      # (BH, N, packed_d_v)
@@ -27,6 +28,7 @@ def _turboquant_fused_decode_kernel(
     stride_s_bh, stride_s_n, stride_s_d,
     stride_n_bh, stride_n_n,
     stride_rn_bh, stride_rn_n,
+    stride_sc_bh, stride_sc_n,
     stride_v_bh, stride_v_n, stride_v_d,
     stride_vs_bh, stride_vs_n, stride_vs_g,
     stride_vz_bh, stride_vz_n, stride_vz_g,
@@ -59,7 +61,6 @@ def _turboquant_fused_decode_kernel(
 
     # Offsets
     d_offs = tl.arange(0, D)
-    g_offs = d_offs // GROUP_SIZE
 
     num_blocks = tl.cdiv(N, BLOCK_N)
     for block_idx in range(num_blocks):
@@ -83,7 +84,8 @@ def _turboquant_fused_decode_kernel(
                     mse_scores += q_val * centroid_val
         
         key_norms = tl.load(NORMS_ptr + pid_bh * stride_n_bh + n_offs * stride_n_n, mask=n_mask, other=0.0).to(tl.float32)
-        mse_scores *= key_norms
+        key_scales = tl.load(SCALES_ptr + pid_bh * stride_sc_bh + n_offs * stride_sc_n, mask=n_mask, other=1.0).to(tl.float32)
+        mse_scores *= (key_norms * key_scales)
 
         # ── Part 2: QJL Score (Key) ──
         qjl_dot = tl.zeros([BLOCK_N], dtype=tl.float32)
@@ -116,31 +118,22 @@ def _turboquant_fused_decode_kernel(
 
         # ── Part 3: Value Aggregation (Hybrid Vectorized Unpacking) ──
         for byte_idx in range(PACKED_D_V):
-            # Load block of packed Value indices (1D: BLOCK_N)
             v_packed = tl.load(V_DATA_ptr + pid_bh * stride_v_bh + n_offs * stride_v_n + byte_idx * stride_v_d,
                               mask=n_mask, other=0).to(tl.int32)
             
             for sub in range(V_VALS_PER_BYTE):
                 coord_idx = byte_idx * V_VALS_PER_BYTE + sub
                 if coord_idx < D:
-                    # Unpack Value index
                     v_idx = ((v_packed >> (sub * V_BITS)) & V_BIT_MASK).to(tl.float32)
                     
-                    # Robust direct load for metadata (1D)
                     g_idx = coord_idx // GROUP_SIZE
                     v_s = tl.load(V_SCALES_ptr + pid_bh * stride_vs_bh + n_offs * stride_vs_n + g_idx * stride_vs_g,
                                  mask=n_mask, other=1.0).to(tl.float32)
                     v_z = tl.load(V_ZEROS_ptr + pid_bh * stride_vz_bh + n_offs * stride_vz_n + g_idx * stride_vz_g,
                                  mask=n_mask, other=0.0).to(tl.float32)
                     
-                    # Dequantize: V = (idx - zero) * scale
-                    # v_idx, v_s, v_z are all 1D (BLOCK_N)
-                    v_val = (v_idx - v_z) * v_s 
-                    
-                    # Weighted contribution for this dimension
+                    v_val = v_idx * v_s + v_z
                     acc_val = tl.sum(p * v_val, 0)
-                    
-                    # Update accumulator (D) - use mask for dimension coord_idx
                     mask_d = (d_offs == coord_idx)
                     acc = tl.where(mask_d, acc + acc_val, acc)
 
@@ -174,6 +167,7 @@ def turboquant_fused_decode(
     qjl_signs = quantized_key.qjl_signs
     norms = quantized_key.norms
     res_norms = quantized_key.residual_norms
+    scales = quantized_key.scales.squeeze(-1) # (BH, N)
     
     # Value Metadata
     v_data = value_quantized.indices
@@ -186,6 +180,7 @@ def turboquant_fused_decode(
         qjl_signs = qjl_signs.flatten(0, -3)
         norms = norms.flatten(0, -2)
         res_norms = res_norms.flatten(0, -2)
+        scales = scales.flatten(0, -2)
         v_data = v_data.flatten(0, -3)
         v_scales = v_scales.flatten(0, -3)
         v_zeros = v_zeros.flatten(0, -3)
@@ -205,7 +200,7 @@ def turboquant_fused_decode(
 
     _turboquant_fused_decode_kernel[grid](
         q_rot, q_sketch,
-        mse_packed, qjl_signs, norms, res_norms, centroids,
+        mse_packed, qjl_signs, norms, res_norms, scales, centroids,
         v_data, v_scales, v_zeros, out,
         q_rot.stride(0), q_rot.stride(1),
         q_sketch.stride(0), q_sketch.stride(1),
@@ -213,6 +208,7 @@ def turboquant_fused_decode(
         qjl_signs.stride(0), qjl_signs.stride(1), qjl_signs.stride(2),
         norms.stride(0), norms.stride(1),
         res_norms.stride(0), res_norms.stride(1),
+        scales.stride(0), scales.stride(1),
         v_data.stride(0), v_data.stride(1), v_data.stride(2),
         v_scales.stride(0), v_scales.stride(1), v_scales.stride(2),
         v_zeros.stride(0), v_zeros.stride(1), v_zeros.stride(2),

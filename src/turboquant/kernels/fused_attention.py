@@ -28,6 +28,7 @@ from .fused_ref import attention_score_mse, attention_score_prod
 
 try:
     from .triton_attention import turboquant_mse_score, turboquant_qjl_score, turboquant_fused_decode
+    from .paged_fused import turboquant_paged_fused_attention
     HAS_TRITON = True
 except ImportError:
     HAS_TRITON = False
@@ -56,11 +57,11 @@ def attention_score_prod_dispatch(
             q_rot = q_rot.reshape(-1, q_rot.shape[-1])
             q_sketch = q_sketch.reshape(-1, q_sketch.shape[-1])
 
-        qjl_factor = math.sqrt(math.pi / 2.0) / math.sqrt(quantizer.block_size)
+        qjl_factor = math.sqrt(math.pi / 2.0) / quantizer.block_size
 
         scores = turboquant_mse_score(
             q_rot, quantized_key.mse_indices, quantized_key.norms, quantized_key.scales,
-            centroids, k_bits, mse_scale=1.0
+            centroids, k_bits - 1, mse_scale=1.0
         )
         scores = turboquant_qjl_score(
             q_sketch, quantized_key.qjl_signs, quantized_key.residual_norms, quantized_key.norms, 
@@ -97,11 +98,11 @@ def turboquant_attention(
         
         q_rot, q_sketch = quantizer.transform_query(query)
         centroids = LM_CENTROIDS[k_bits].to(query.device, query.dtype)
-        qjl_factor = math.sqrt(math.pi / 2.0) / math.sqrt(quantizer.block_size)
+        qjl_factor = math.sqrt(math.pi / 2.0) / quantizer.block_size
         
         output = turboquant_fused_decode(
             q_rot, q_sketch, quantized_key, value,
-            centroids, k_bits, v_bits, qjl_factor, scale, group_size
+            centroids, k_bits - 1, v_bits, qjl_factor, scale, group_size
         )
         # Unpad from block_size back to head_dim if necessary
         if output.shape[-1] > quantizer.dim:
@@ -109,6 +110,54 @@ def turboquant_attention(
             
         # Reshape back to query shape (Batch, Head, Dim) or (Batch, Seq, Head, Dim)
         return output.reshape(query.shape).to(query.dtype), None  # No weights returned in fused path
+
+def paged_turboquant_attention(
+    query: torch.Tensor,
+    kv_cache, # TurboQuantKVCache
+    k_bits: int,
+    v_bits: int,
+    qjl_scale: float,
+    sm_scale: float,
+) -> torch.Tensor:
+    """
+    Dispatcher for Paged Attention Path.
+    """
+    if not HAS_TRITON or not query.is_cuda:
+        # Fallback to contiguous reconstruction for CPU/Ref (Slow)
+        # In a production environment, we'd want a specialized CPU paged path or just reject.
+        raise RuntimeError("Paged Attention requires Triton and CUDA.")
+        
+    # Query Transform
+    q_rot, q_sketch = kv_cache.k_quantizer.transform_query(query)
+    
+    # Flatten Batch/Heads for Triton grid
+    D = q_rot.shape[-1]
+    q_rot = q_rot.view(-1, D)
+    q_sketch = q_sketch.view(-1, D)
+    
+    # Block Table logic
+    paged_meta = kv_cache.get_paged_ptrs()
+    
+    # Centroids
+    from ..quant.lloyd_max import LM_CENTROIDS
+    centroids = LM_CENTROIDS[k_bits].to(query.device, query.dtype)
+    
+    output = turboquant_paged_fused_attention(
+        q_rot, q_sketch,
+        kv_cache.pool,
+        paged_meta["block_table"],
+        paged_meta["context_len"],
+        centroids,
+        kv_cache.n_heads,
+        k_bits-1, v_bits, # SOTA FIX: Use MSE bits (bits-1)
+        qjl_scale, sm_scale
+    )
+    
+    # Unpad
+    if output.shape[-1] > kv_cache.head_dim:
+        output = output[..., :kv_cache.head_dim]
+        
+    return output.reshape(query.shape).to(query.dtype)
 
     # CASE B: Standard Path (De-coupled Scores + Softmax)
     # 1. Compute scores

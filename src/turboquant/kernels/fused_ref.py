@@ -58,7 +58,7 @@ def attention_score_prod(
     sign_float = k_qjl_signs.float() * 2.0 - 1.0
     qjl_dot = torch.matmul(q_qjl_projected, sign_float.transpose(-2, -1).to(q_qjl_projected.dtype))
     
-    qjl_factor = math.sqrt(math.pi / 2.0) / math.sqrt(block_size)
+    qjl_factor = math.sqrt(math.pi / 2.0) / block_size
     scores_qjl = qjl_factor * qjl_dot * quantized_key.residual_norms.unsqueeze(-2)
 
     return (scores_mse + scores_qjl) * scale

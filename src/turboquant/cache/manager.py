@@ -1,118 +1,131 @@
 import torch
 import torch.nn as nn
+from typing import List, Optional, Dict, Any, Tuple
 import math
-from typing import List, Optional, Dict, Any
 
-from ..quant.quantizer import TurboQuantProd, TurboQuantValue
-from ..kernels.fused_attention import attention_score_prod
+from ..quant.key_quantizer import TurboQuantProd
+from ..quant.value_quantizer import TurboQuantValue
 from .block_pool import KVBlockPool
 from .routing import LayerRouting, QuantizationStrategy
 
 class TurboQuantKVCache:
     """
-    Paged KV Cache for a single transformer layer.
-    Manages physical blocks in a shared pool and performs JIT quantization.
+    Paged KV Cache Manager for a single Transformer Layer.
+    Implementation of the SOTA Logical-to-Physical Block Mapping.
+    
+    Architecture:
+    - Slot Allocation: Manages token positions within a block.
+    - Block Table: Provides the mapping for Unified Attention Kernels.
     """
     def __init__(
         self,
         layer_idx: int,
         pool: KVBlockPool,
-        routing: LayerRouting,
-        key_bits: int = 4,
-        value_bits: int = 4,
+        routing: Optional[LayerRouting] = None,
+        k_bits: int = 8,
+        v_bits: int = 3,
     ):
         self.layer_idx = layer_idx
         self.pool = pool
-        self.routing = routing
-        self.head_dim = pool.head_dim
-        self.n_heads = pool.n_heads
         self.block_size = pool.block_size
+        self.n_heads = pool.n_heads
+        self.head_dim = pool.head_dim
         
-        # Strategy for this layer (Boundary Protection)
-        self.strategy = routing.get_strategy(layer_idx)
+        # Bits configuration
+        self.k_bits = k_bits
+        self.v_bits = v_bits
         
-        # Quantizers (only initialized if needed for middle layers)
-        if self.strategy == QuantizationStrategy.TURBO_4BIT:
-            self.k_quantizer = TurboQuantProd(self.head_dim, bits=key_bits)
-            self.v_quantizer = TurboQuantValue(self.head_dim, bits=value_bits)
-        else:
-            self.k_quantizer = None
-            self.v_quantizer = None
-            
-        # Paged State
+        # Quantizers
+        self.k_quantizer = TurboQuantProd(self.head_dim, bits=k_bits).to(pool.device)
+        self.v_quantizer = TurboQuantValue(self.head_dim, bits=v_bits).to(pool.device)
+        
+        # Sequence State
         self.block_ids: List[int] = []
         self.num_tokens = 0
         
-        # Current logical block pointers
-        self.current_block_idx = -1
-        self.tokens_in_current_block = 0
+        # Pre-allocated block table (for Triton)
+        # We start with a small table and expand (Logical Mapping Only)
+        self.block_table = torch.zeros(0, dtype=torch.int32, device=pool.device)
 
-    def _get_new_block(self):
-        """Allocate a new physical block from the pool."""
-        bid = self.pool.allocate(1)[0]
+    def _allocate_new_block(self):
+        """Request a physical block from the global pool."""
+        bid_tensor = self.pool.allocate(1)
+        bid = bid_tensor.item()
         self.block_ids.append(bid)
-        self.current_block_idx += 1
-        self.tokens_in_current_block = 0
+        
+        # Update block table for Triton
+        self.block_table = torch.tensor(self.block_ids, dtype=torch.int32, device=self.pool.device)
         return bid
 
     def append(self, k: torch.Tensor, v: torch.Tensor):
         """
-        Append new KV tensors (usually from a single decode step).
-        k, v: (batch=1, n_heads, 1, head_dim)
+        Compress and store new KV tokens into the paged pool.
+        k, v: (batch=1, n_heads, seq_len=1, d)
         """
-        if self.current_block_idx == -1 or self.tokens_in_current_block == self.block_size:
-            self._get_new_block()
+        # Ensure block availability
+        if len(self.block_ids) == 0 or (self.num_tokens % self.block_size == 0):
+            self._allocate_new_block()
             
-        bid = self.block_ids[self.current_block_idx]
-        token_offset = self.tokens_in_current_block
+        current_block_id = self.block_ids[-1]
+        slot_offset = self.num_tokens % self.block_size
         
-        # 1. Routing Logic (Boundary Protection)
-        if self.strategy == QuantizationStrategy.TURBO_4BIT:
-            # SOTA: Quantize before storage
-            # k: (1, n_heads, 1, d) -> indices, signs, metadata
-            k_q = self.k_quantizer.quantize(k.squeeze(2), pack=True)
-            v_q = self.v_quantizer.quantize(v.squeeze(2), pack=True)
-            
-            # Write K to pool
-            self.pool.k_indices[bid, :, token_offset] = k_q.mse_indices.squeeze(0)
-            self.pool.k_qjl[bid, :, token_offset] = k_q.qjl_signs.squeeze(0)
-            self.pool.k_metadata[bid, :, token_offset, 0] = k_q.residual_norms.squeeze(0)
-            self.pool.k_metadata[bid, :, token_offset, 1] = k_q.norms.squeeze(0)
-            
-            # Write V to pool
-            self.pool.v_indices[bid, :, token_offset] = v_q.indices.squeeze(0)
-            self.pool.v_metadata[bid, :, token_offset] = torch.stack([v_q.scales, v_q.zero_points], dim=-1).squeeze(0)
-        else:
-            # Fallback: FP16/BF16 (Simplified for this manager to just use the pool's metadata slot
-            # as a pointer or mock storage. In a real system, we'd have a separate FP16 pool.)
-            # For this audit, we'll focus on the TURBO_4BIT path.
-            pass
+        # 1. Quantization (SOTA Hybrid Precision)
+        # Input shape: (1, n_heads, 1, d) -> squeeze to (n_heads, d)
+        k_in = k.view(self.n_heads, self.head_dim)
+        v_in = v.view(self.n_heads, self.head_dim)
+        
+        k_q = self.k_quantizer.quantize(k_in)
+        v_q = self.v_quantizer.quantize(v_in)
+        
+        # 2. Store Key to Pool (Paged Access)
+        # Using [block_id, head, slot] indexing
+        self.pool.k_indices[current_block_id, :, slot_offset] = k_q.mse_indices.view(self.n_heads, -1)
+        self.pool.k_qjl[current_block_id, :, slot_offset] = k_q.qjl_signs.view(self.n_heads, -1)
+        self.pool.k_metadata[current_block_id, :, slot_offset, 0] = k_q.residual_norms.view(-1)
+        self.pool.k_metadata[current_block_id, :, slot_offset, 1] = (k_q.norms * k_q.scales.view(-1))
+        
+        # 3. Store Value to Pool
+        self.pool.v_indices[current_block_id, :, slot_offset] = v_q.indices.view(self.n_heads, -1)
+        
+        # SOTA FIX: Store V metadata for EVERY token
+        self.pool.v_metadata[current_block_id, :, slot_offset, 0] = v_q.scales.view(-1)
+        self.pool.v_metadata[current_block_id, :, slot_offset, 1] = v_q.zero_points.view(-1)
             
         self.num_tokens += 1
-        self.tokens_in_current_block += 1
 
     def attention_score(self, query: torch.Tensor) -> torch.Tensor:
         """
-        Compute attention scores for all tokens in cache.
+        Compute attention scores using the Paged Triton Kernel.
         query: (batch=1, n_heads, 1, head_dim)
         Returns: (batch=1, n_heads, 1, num_tokens)
         """
         if self.num_tokens == 0:
             return torch.zeros((1, self.n_heads, 1, 0), device=query.device)
             
-        # Standard decode path: scoring query against paged blocks
-        all_scores = []
+        from ..kernels.fused_attention import paged_turboquant_attention
         
-        for i, bid in enumerate(self.block_ids):
-            # Calculate how many tokens to read from this block
-            active_tokens = self.block_size if i < self.current_block_idx else self.tokens_in_current_block
-            
-            if self.strategy == QuantizationStrategy.TURBO_4BIT:
-                # Optimized scoring against quantized blocks
-                # We need to reconstruct a ProdQuantized object for the kernel
-                # (Or create a kernel that takes the pool directly - Milestone 5)
-                # For now, we simulate by extracting from pool
-                pass
-            
-        # Simulation for Audit: Returning placeholder for now until Milestone 5 (Triton)
-        return torch.randn((1, self.n_heads, 1, self.num_tokens), device=query.device)
+        # Unified Paged Dispatch
+        sm_scale = 1.0 / math.sqrt(self.head_dim)
+        qjl_scale = math.sqrt(math.pi / 2.0) / 128
+        
+        return paged_turboquant_attention(
+            query, self, self.k_bits, self.v_bits,
+            qjl_scale, sm_scale
+        )
+
+    def get_paged_ptrs(self):
+        """Returns the necessary metadata for the Paged Triton Kernel."""
+        return {
+            "block_table": self.block_table,
+            "context_len": self.num_tokens,
+            "k_bits": self.k_bits,
+            "v_bits": self.v_bits
+        }
+
+    def clear(self):
+        """Free all physical blocks back to pool."""
+        if self.block_ids:
+            self.pool.free(torch.tensor(self.block_ids))
+            self.block_ids = []
+            self.block_table = torch.zeros(0, dtype=torch.int32, device=self.pool.device)
+            self.num_tokens = 0
