@@ -1,0 +1,113 @@
+============================= test session starts ==============================
+platform linux -- Python 3.9.25, pytest-8.4.2, pluggy-1.6.0 -- /home/minh/tq_venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /mnt/c/Users/ADMIN/OneDrive/Desktop/turboquant_pp
+configfile: pyproject.toml
+collecting ... collected 86 items
+
+tests/test_fused_attention.py::test_attention_score_mse_shape[128] PASSED [  1%]
+tests/test_fused_attention.py::test_attention_score_mse_shape[256] PASSED [  2%]
+tests/test_fused_attention.py::test_attention_score_prod_shape[128] PASSED [  3%]
+tests/test_fused_attention.py::test_attention_score_prod_shape[256] PASSED [  4%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation FAILED [  5%]
+tests/test_fused_attention.py::test_turboquant_attention_output_shape PASSED [  6%]
+tests/test_fused_attention.py::test_attention_quality_vs_true FAILED     [  8%]
+tests/test_lloyd_max.py::test_lloyd_max_range[1] PASSED                  [  9%]
+tests/test_lloyd_max.py::test_lloyd_max_range[2] PASSED                  [ 10%]
+tests/test_lloyd_max.py::test_lloyd_max_range[3] PASSED                  [ 11%]
+tests/test_lloyd_max.py::test_lloyd_max_range[4] PASSED                  [ 12%]
+tests/test_lloyd_max.py::test_lloyd_max_range[5] PASSED                  [ 13%]
+tests/test_lloyd_max.py::test_lloyd_max_range[6] PASSED                  [ 15%]
+tests/test_lloyd_max.py::test_lloyd_max_range[7] PASSED                  [ 16%]
+tests/test_lloyd_max.py::test_lloyd_max_range[8] PASSED                  [ 17%]
+tests/test_lloyd_max.py::test_lloyd_max_reconstruction_values[2] PASSED  [ 18%]
+tests/test_lloyd_max.py::test_lloyd_max_reconstruction_values[4] PASSED  [ 19%]
+tests/test_lloyd_max.py::test_lloyd_max_monotonicity PASSED              [ 20%]
+tests/test_lloyd_max.py::test_lloyd_max_device_dtype PASSED              [ 22%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-64] PASSED            [ 23%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-128] PASSED           [ 24%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-256] PASSED           [ 25%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-64] PASSED            [ 26%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-128] PASSED           [ 27%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-256] PASSED           [ 29%]
+tests/test_quantizer.py::test_mse_roundtrip[3-64] PASSED                 [ 30%]
+tests/test_quantizer.py::test_mse_roundtrip[3-128] PASSED                [ 31%]
+tests/test_quantizer.py::test_mse_roundtrip[3-256] PASSED                [ 32%]
+tests/test_quantizer.py::test_mse_roundtrip[4-64] PASSED                 [ 33%]
+tests/test_quantizer.py::test_mse_roundtrip[4-128] PASSED                [ 34%]
+tests/test_quantizer.py::test_mse_roundtrip[4-256] PASSED                [ 36%]
+tests/test_quantizer.py::test_prod_quantize_flow[4-128] PASSED           [ 37%]
+tests/test_quantizer.py::test_prod_roundtrip PASSED                      [ 38%]
+tests/test_quantizer.py::test_prod_roundtrip_nonstandard_dim PASSED      [ 39%]
+tests/test_quantizer.py::test_bit_packing_lossless[4] PASSED             [ 40%]
+tests/test_quantizer.py::test_bit_packing_lossless[8] PASSED             [ 41%]
+tests/test_quantizer.py::test_prod_broadcasting PASSED                   [ 43%]
+tests/test_quantizer.py::test_mse_broadcasting PASSED                    [ 44%]
+tests/test_quantizer.py::test_prod_better_than_mse_at_same_total_bits PASSED [ 45%]
+tests/test_rope.py::test_rope_identity_at_zero[64] PASSED                [ 46%]
+tests/test_rope.py::test_rope_identity_at_zero[128] PASSED               [ 47%]
+tests/test_rope.py::test_rope_identity_at_zero[256] PASSED               [ 48%]
+tests/test_rope.py::test_rope_relative_position[64] PASSED               [ 50%]
+tests/test_rope.py::test_rope_relative_position[128] PASSED              [ 51%]
+tests/test_rope.py::test_rope_relative_position[256] PASSED              [ 52%]
+tests/test_rope.py::test_apply_rope_functional[64] PASSED                [ 53%]
+tests/test_rope.py::test_apply_rope_functional[128] PASSED               [ 54%]
+tests/test_rope.py::test_apply_rope_functional[256] PASSED               [ 55%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-64] PASSED   [ 56%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-128] PASSED  [ 58%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-256] PASSED  [ 59%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-64] PASSED   [ 60%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-128] PASSED  [ 61%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-256] PASSED  [ 62%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-64] PASSED   [ 63%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-128] PASSED  [ 65%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-256] PASSED  [ 66%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[1-64] PASSED    [ 67%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[1-128] PASSED   [ 68%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[2-64] PASSED    [ 69%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[2-128] PASSED   [ 70%]
+tests/test_rotation.py::test_cascaded_independence PASSED                [ 72%]
+tests/test_sign_array.py::test_sign_values_domain[64] PASSED             [ 73%]
+tests/test_sign_array.py::test_sign_values_domain[128] PASSED            [ 74%]
+tests/test_sign_array.py::test_sign_values_domain[256] PASSED            [ 75%]
+tests/test_sign_array.py::test_sign_values_domain[512] PASSED            [ 76%]
+tests/test_sign_array.py::test_deterministic_seed[64] PASSED             [ 77%]
+tests/test_sign_array.py::test_deterministic_seed[128] PASSED            [ 79%]
+tests/test_sign_array.py::test_deterministic_seed[256] PASSED            [ 80%]
+tests/test_sign_array.py::test_sign_inverse[64] PASSED                   [ 81%]
+tests/test_sign_array.py::test_sign_inverse[128] PASSED                  [ 82%]
+tests/test_sign_array.py::test_sign_inverse[256] PASSED                  [ 83%]
+tests/test_sign_array.py::test_llama_presets[256] PASSED                 [ 84%]
+tests/test_sign_array.py::test_apply_sign_broadcasting PASSED            [ 86%]
+tests/test_wht.py::test_orthogonality[64] PASSED                         [ 87%]
+tests/test_wht.py::test_orthogonality[128] PASSED                        [ 88%]
+tests/test_wht.py::test_orthogonality[256] PASSED                        [ 89%]
+tests/test_wht.py::test_fwht_vs_naive[64] PASSED                         [ 90%]
+tests/test_wht.py::test_fwht_vs_naive[128] PASSED                        [ 91%]
+tests/test_wht.py::test_fwht_vs_naive[256] PASSED                        [ 93%]
+tests/test_wht.py::test_roundtrip[64] PASSED                             [ 94%]
+tests/test_wht.py::test_roundtrip[128] PASSED                            [ 95%]
+tests/test_wht.py::test_roundtrip[256] PASSED                            [ 96%]
+tests/test_wht.py::test_norm_preservation[64] PASSED                     [ 97%]
+tests/test_wht.py::test_norm_preservation[128] PASSED                    [ 98%]
+tests/test_wht.py::test_norm_preservation[256] PASSED                    [100%]
+
+=================================== FAILURES ===================================
+____________________ test_attention_score_prod_correlation _____________________
+tests/test_fused_attention.py:64: in test_attention_score_prod_correlation
+    assert corr.item() > 0.95, f"Score correlation {corr:.4f} too low"
+E   AssertionError: Score correlation 0.1733 too low
+E   assert 0.17326714098453522 > 0.95
+E    +  where 0.17326714098453522 = <built-in method item of Tensor object at 0x7a84ada2c950>()
+E    +    where <built-in method item of Tensor object at 0x7a84ada2c950> = tensor(0.1733).item
+________________________ test_attention_quality_vs_true ________________________
+tests/test_fused_attention.py:117: in test_attention_quality_vs_true
+    assert rel_error.item() < 0.3, f"Attention output relative error {rel_error:.4f} too high"
+E   AssertionError: Attention output relative error 4.4106 too high
+E   assert 4.410637378692627 < 0.3
+E    +  where 4.410637378692627 = <built-in method item of Tensor object at 0x7a84ad96a590>()
+E    +    where <built-in method item of Tensor object at 0x7a84ad96a590> = tensor(4.4106).item
+=========================== short test summary info ============================
+FAILED tests/test_fused_attention.py::test_attention_score_prod_correlation
+FAILED tests/test_fused_attention.py::test_attention_quality_vs_true - Assert...
+========================= 2 failed, 84 passed in 4.03s =========================
