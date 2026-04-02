@@ -56,6 +56,7 @@ def paged_turboquant_attention(
     v_bits: int,
     qjl_scale: float,
     sm_scale: float,
+    quest_threshold: float = 1e-4,
 ) -> torch.Tensor:
     """
     Consolidated Dispatcher for Paged Attention Path.
@@ -89,7 +90,7 @@ def paged_turboquant_attention(
     
     # Delegate everything to the kernel-specific module to avoid circular dependency
     from .paged_fused import turboquant_paged_fused_attention as paged_dispatch
-    return paged_dispatch(query, kv_cache, k_bits, v_bits, qjl_scale, sm_scale)
+    return paged_dispatch(query, kv_cache, k_bits, v_bits, qjl_scale, sm_scale, quest_threshold)
 
 def turboquant_attention(
     query: torch.Tensor,

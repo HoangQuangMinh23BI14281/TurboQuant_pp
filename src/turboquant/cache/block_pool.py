@@ -85,6 +85,18 @@ class KVBlockPool:
             dtype=self.dtype, device=self.device
         )
         
+        # 3. Quest & H2O Accelerators
+        # k_summaries: (num_blocks, n_heads, 2, head_dim) -> [min, max] for block-level Quest skipping
+        self.k_summaries = torch.zeros(
+            (num_blocks, n_heads, 2, head_dim),
+            dtype=torch.float32, device=self.device
+        )
+        # block_importance: (num_blocks, n_heads) -> Cumulative Softmax score for H2O eviction
+        self.block_importance = torch.zeros(
+            (num_blocks, n_heads),
+            dtype=torch.float32, device=self.device
+        )
+        
         # Free list management
         self.free_blocks = list(range(num_blocks))
         self.allocated_blocks = 0
@@ -113,3 +125,5 @@ class KVBlockPool:
         self.v_metadata.zero_()
         self.k_fp16.zero_()
         self.v_fp16.zero_()
+        self.k_summaries.zero_()
+        self.block_importance.zero_()

@@ -68,6 +68,10 @@ class TurboQuantKVCache:
         batch, n_heads, seq_len, head_dim = k.shape
         assert batch == 1, "TurboQuant Paged Cache currently supports batch=1 append"
         
+        # Ensure inputs are on the same device as the pool
+        k = k.to(self.device)
+        v = v.to(self.device)
+        
         # Check if we need a new block
         if self.num_tokens % self.tokens_per_block == 0:
             new_block_id = self.pool.allocate_block()
@@ -76,24 +80,31 @@ class TurboQuantKVCache:
         current_block_id = self.block_table[-1]
         slot_offset = self.num_tokens % self.tokens_per_block
         
+        # Prepare Input View (Standardized across paths)
+        k_in = k.reshape(self.n_heads, self.head_dim)
+        v_in = v.reshape(self.n_heads, self.head_dim)
+        
+        # 1. Quest Summary Update (SOTA Sparsity - Universal)
+        # Update dimension-wise Min/Max for the current block (applied to both FP16/Quant paths)
+        if slot_offset == 0:
+            self.pool.k_summaries[current_block_id, :, 0, :] = k_in
+            self.pool.k_summaries[current_block_id, :, 1, :] = k_in
+        else:
+            self.pool.k_summaries[current_block_id, :, 0, :] = torch.min(self.pool.k_summaries[current_block_id, :, 0, :], k_in)
+            self.pool.k_summaries[current_block_id, :, 1, :] = torch.max(self.pool.k_summaries[current_block_id, :, 1, :], k_in)
+            
         if self.strategy == QuantizationStrategy.FP16:
             # Native FP16 Path: No compression, straight to pool
-            self.pool.k_fp16[current_block_id, :, slot_offset] = k.reshape(self.n_heads, self.head_dim)
-            self.pool.v_fp16[current_block_id, :, slot_offset] = v.reshape(self.n_heads, self.head_dim)
+            self.pool.k_fp16[current_block_id, :, slot_offset] = k_in
+            self.pool.v_fp16[current_block_id, :, slot_offset] = v_in
         else:
             # Quantized Path (TURBO_4BIT)
             # 1. Quantize with Mandatory Bit-Packing
-            k_in = k.reshape(self.n_heads, self.head_dim)
-            v_in = v.reshape(self.n_heads, self.head_dim)
-            
-            # Robust unpacking: handle both Prod (mse_indices) and MSE (indices) NamedTuples
             k_res = self.k_quantizer.quantize(k_in, pack=True)
-            # If it has indices/mse_indices, it's a TurboQuant NamedTuple object
             k_q = k_res if (hasattr(k_res, 'indices') or hasattr(k_res, 'mse_indices')) else k_res[0]
-            
             v_q = self.v_quantizer.quantize(v_in, pack=True)
             
-            # 2. Store to Pool (Dynamic shapes handled by Pool allocation)
+            # 2. Store to Pool
             k_raw_indices = getattr(k_q, "indices", getattr(k_q, "mse_indices", None))
             self.pool.k_indices[current_block_id, :, slot_offset] = k_raw_indices.to(torch.uint8)
             
@@ -101,17 +112,17 @@ class TurboQuantKVCache:
             if qjl_raw is not None:
                 self.pool.k_qjl[current_block_id, :, slot_offset] = qjl_raw.to(torch.uint8)
             
-            # Metadata: Norm, Scale, and Residual Norm
-            self.pool.k_metadata[current_block_id, :, slot_offset, 0] = k_q.norms.flatten()
+            # Metadata: Norm, Scale, and Residual Norm (Ensure device match)
+            self.pool.k_metadata[current_block_id, :, slot_offset, 0] = k_q.norms.flatten().to(self.device)
             if hasattr(k_q, 'scales') and k_q.scales is not None:
-                self.pool.k_metadata[current_block_id, :, slot_offset, 1] = k_q.scales.flatten()
+                self.pool.k_metadata[current_block_id, :, slot_offset, 1] = k_q.scales.flatten().to(self.device)
             if hasattr(k_q, 'residual_norms') and k_q.residual_norms is not None:
-                self.pool.k_metadata[current_block_id, :, slot_offset, 2] = k_q.residual_norms.flatten()
+                self.pool.k_metadata[current_block_id, :, slot_offset, 2] = k_q.residual_norms.flatten().to(self.device)
             
             self.pool.v_indices[current_block_id, :, slot_offset] = v_q.indices.to(torch.uint8)
-            self.pool.v_metadata[current_block_id, :, slot_offset, :, 0] = v_q.scales.reshape(self.n_heads, -1)
-            self.pool.v_metadata[current_block_id, :, slot_offset, :, 1] = v_q.zero_points.reshape(self.n_heads, -1)
-            
+            self.pool.v_metadata[current_block_id, :, slot_offset, :, 0] = v_q.scales.reshape(self.n_heads, -1).to(self.device)
+            self.pool.v_metadata[current_block_id, :, slot_offset, :, 1] = v_q.zero_points.reshape(self.n_heads, -1).to(self.device)
+                
         self.num_tokens += seq_len
 
     def get_paged_ptrs(self) -> Dict[str, any]:
@@ -124,7 +135,12 @@ class TurboQuantKVCache:
             "num_tokens": self.num_tokens,
         }
 
-    def attention_score(self, query: torch.Tensor, scale: Optional[float] = None) -> torch.Tensor:
+    def attention_score(
+        self, 
+        query: torch.Tensor, 
+        scale: Optional[float] = None,
+        quest_threshold: float = 1e-4
+    ) -> torch.Tensor:
         """Convenience wrapper for Paged Attention execution."""
         from turboquant.kernels.fused_attention import paged_turboquant_attention
         
@@ -143,5 +159,36 @@ class TurboQuantKVCache:
             k_bits=k_bits, 
             v_bits=v_bits, 
             qjl_scale=qjl_scale, 
-            sm_scale=scale
+            sm_scale=scale,
+            quest_threshold=quest_threshold
         )
+
+    def evict_idle_blocks(self, threshold: float = 1e-4, min_keep: int = 1):
+        """
+        H2O (Heavy Hitter Oracle): Evict blocks with low importance scores.
+        threshold: Cumulative importance threshold below which a block is considered for eviction.
+        min_keep: Minimum number of most recent blocks to always keep (for local context).
+        """
+        if len(self.block_table) <= min_keep:
+            return # Nothing to evict
+            
+        # Get importance scores for blocks assigned to this layer
+        # scores shape: (num_blocks_in_table, n_heads)
+        physical_ids = torch.tensor(self.block_table[:-min_keep], dtype=torch.long, device=self.device)
+        importance_scores = self.pool.block_importance[physical_ids].mean(dim=-1) # Average importance across heads
+        
+        # Identify indices to evict (Score < threshold)
+        to_evict_mask = importance_scores < threshold
+        indices_to_evict = torch.where(to_evict_mask)[0].cpu().tolist()
+        
+        if not indices_to_evict:
+            return
+            
+        # Perform eviction (Reverse order to maintain indexing)
+        for idx in sorted(indices_to_evict, reverse=True):
+            block_id = self.block_table.pop(idx)
+            self.pool.free_block(block_id)
+            self.num_tokens -= self.tokens_per_block
+            
+        # Reset importance after eviction to allow new blocks to prove themselves
+        self.pool.block_importance[physical_ids].zero_()
