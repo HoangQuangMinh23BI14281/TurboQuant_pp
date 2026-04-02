@@ -1,6 +1,7 @@
 import torch
 import pytest
-from turboquant.quant.quantizer import TurboQuantMSE, TurboQuantProd, MSEQuantized, ProdQuantized, pack_indices, unpack_indices
+from turboquant.quant.key_quantizer import TurboQuantProd, TurboQuantMSE
+from turboquant.quant.quant_base import MSEQuantized, ProdQuantized, pack_indices, unpack_indices
 
 # ─── TurboQuantMSE Tests ─────────────────────────────────────────────
 

@@ -1,0 +1,421 @@
+--- 1. SMART SYNC (Preserving .venv) ---
+--- 2. UV SYNC (Module Registration) ---
+Resolved 67 packages in 1ms
+Checked 36 packages in 0.38ms
+Checked 1 package in 1ms
+--- 4. RUNNING FINAL VERIFICATION ---
+[Status] Running debug_hybrid.py...
+--- DEBUG HYBRID PRECISION ---
+Device: cuda, Head Dim: 64
+Input Q shape: torch.Size([1, 1, 256])
+Layer Strategy: QuantizationStrategy.TURBO_4BIT
+Running Forward Pass (Quantized Layer 1)...
+Success! Output shape: torch.Size([1, 1, 256])
+[Status] Running Pytest Suite...
+============================= test session starts ==============================
+platform linux -- Python 3.9.25, pytest-8.4.2, pluggy-1.6.0 -- /home/minh/projects/turboquant_pp/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/minh/projects/turboquant_pp
+configfile: pyproject.toml
+testpaths: tests
+collecting ... collected 163 items
+
+tests/test_architectural_branching.py::test_fp16_paged_storage_and_gather PASSED [  0%]
+tests/test_architectural_branching.py::test_hybrid_precision_paged_attention FAILED [  1%]
+tests/test_fused_attention.py::test_attention_score_mse_shape[128] PASSED [  1%]
+tests/test_fused_attention.py::test_attention_score_mse_shape[256] PASSED [  2%]
+tests/test_fused_attention.py::test_attention_score_prod_shape[128] PASSED [  3%]
+tests/test_fused_attention.py::test_attention_score_prod_shape[256] PASSED [  3%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[0] PASSED [  4%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[1] PASSED [  4%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[2] PASSED [  5%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[3] PASSED [  6%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[4] PASSED [  6%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[5] PASSED [  7%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[6] PASSED [  7%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[7] PASSED [  8%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[8] PASSED [  9%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[9] PASSED [  9%]
+tests/test_fused_attention.py::test_attention_non_gaussian PASSED        [ 10%]
+tests/test_fused_attention.py::test_turboquant_attention_output_shape PASSED [ 11%]
+tests/test_fused_attention.py::test_attention_quality_vs_true PASSED     [ 11%]
+tests/test_hell_fused.py::TestHellFused::test_softmax_stability_hell PASSED [ 12%]
+tests/test_hell_fused.py::TestHellFused::test_long_context_hell PASSED   [ 12%]
+tests/test_hell_fused.py::TestHellFused::test_odd_bit_packing_hell PASSED [ 13%]
+tests/test_hell_fused.py::TestHellFused::test_large_dim_hell PASSED      [ 14%]
+tests/test_hybrid_routing.py::test_boundary_layer_protection PASSED      [ 14%]
+tests/test_hybrid_routing.py::test_hybrid_precision_forward PASSED       [ 15%]
+tests/test_kv_manager.py::test_kv_manager_paged_allocation PASSED        [ 15%]
+tests/test_kv_manager.py::test_kv_manager_metadata_fidelity PASSED       [ 16%]
+tests/test_kv_manager.py::test_kv_manager_boundary_protection PASSED     [ 17%]
+tests/test_lloyd_max.py::test_lloyd_max_range[1] PASSED                  [ 17%]
+tests/test_lloyd_max.py::test_lloyd_max_range[2] PASSED                  [ 18%]
+tests/test_lloyd_max.py::test_lloyd_max_range[3] PASSED                  [ 19%]
+tests/test_lloyd_max.py::test_lloyd_max_range[4] PASSED                  [ 19%]
+tests/test_lloyd_max.py::test_lloyd_max_range[5] PASSED                  [ 20%]
+tests/test_lloyd_max.py::test_lloyd_max_range[6] PASSED                  [ 20%]
+tests/test_lloyd_max.py::test_lloyd_max_range[7] PASSED                  [ 21%]
+tests/test_lloyd_max.py::test_lloyd_max_range[8] PASSED                  [ 22%]
+tests/test_lloyd_max.py::test_lloyd_max_reconstruction_values[2] PASSED  [ 22%]
+tests/test_lloyd_max.py::test_lloyd_max_reconstruction_values[4] PASSED  [ 23%]
+tests/test_lloyd_max.py::test_lloyd_max_monotonicity PASSED              [ 23%]
+tests/test_lloyd_max.py::test_lloyd_max_device_dtype PASSED              [ 24%]
+tests/test_paged_attention.py::TestPagedAttention::test_paged_vs_contiguous_parity[8-3] FAILED [ 25%]
+tests/test_paged_attention.py::TestPagedAttention::test_paged_vs_contiguous_parity[4-4] FAILED [ 25%]
+tests/test_qjl.py::test_qjl_correlation_improvement[3-128] PASSED        [ 26%]
+tests/test_qjl.py::test_qjl_correlation_improvement[3-256] PASSED        [ 26%]
+tests/test_qjl.py::test_qjl_correlation_improvement[4-128] PASSED        [ 27%]
+tests/test_qjl.py::test_qjl_correlation_improvement[4-256] PASSED        [ 28%]
+tests/test_qjl.py::test_qjl_correction_scale PASSED                      [ 28%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-64] PASSED            [ 29%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-128] PASSED           [ 30%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-256] PASSED           [ 30%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-64] PASSED            [ 31%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-128] PASSED           [ 31%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-256] PASSED           [ 32%]
+tests/test_quantizer.py::test_mse_roundtrip[3-64] PASSED                 [ 33%]
+tests/test_quantizer.py::test_mse_roundtrip[3-128] PASSED                [ 33%]
+tests/test_quantizer.py::test_mse_roundtrip[3-256] PASSED                [ 34%]
+tests/test_quantizer.py::test_mse_roundtrip[4-64] PASSED                 [ 34%]
+tests/test_quantizer.py::test_mse_roundtrip[4-128] PASSED                [ 35%]
+tests/test_quantizer.py::test_mse_roundtrip[4-256] PASSED                [ 36%]
+tests/test_quantizer.py::test_prod_quantize_flow[4-128] PASSED           [ 36%]
+tests/test_quantizer.py::test_prod_quantize_packed PASSED                [ 37%]
+tests/test_quantizer.py::test_prod_roundtrip PASSED                      [ 38%]
+tests/test_quantizer.py::test_prod_roundtrip_nonstandard_dim PASSED      [ 38%]
+tests/test_quantizer.py::test_bit_packing_lossless[4] PASSED             [ 39%]
+tests/test_quantizer.py::test_bit_packing_lossless[8] PASSED             [ 39%]
+tests/test_quantizer.py::test_prod_broadcasting PASSED                   [ 40%]
+tests/test_quantizer.py::test_mse_broadcasting PASSED                    [ 41%]
+tests/test_quantizer.py::test_prod_better_than_mse_at_same_total_bits PASSED [ 41%]
+tests/test_quantizer.py::test_bit_perfect_packing[1] PASSED              [ 42%]
+tests/test_quantizer.py::test_bit_perfect_packing[2] PASSED              [ 42%]
+tests/test_quantizer.py::test_bit_perfect_packing[3] PASSED              [ 43%]
+tests/test_quantizer.py::test_bit_perfect_packing[4] PASSED              [ 44%]
+tests/test_quantizer.py::test_bit_perfect_packing[5] PASSED              [ 44%]
+tests/test_quantizer.py::test_bit_perfect_packing[6] PASSED              [ 45%]
+tests/test_quantizer.py::test_bit_perfect_packing[7] PASSED              [ 46%]
+tests/test_quantizer.py::test_bit_perfect_packing[8] PASSED              [ 46%]
+tests/test_rope.py::test_rope_identity_at_zero[64] PASSED                [ 47%]
+tests/test_rope.py::test_rope_identity_at_zero[128] PASSED               [ 47%]
+tests/test_rope.py::test_rope_identity_at_zero[256] PASSED               [ 48%]
+tests/test_rope.py::test_rope_relative_position[64] PASSED               [ 49%]
+tests/test_rope.py::test_rope_relative_position[128] PASSED              [ 49%]
+tests/test_rope.py::test_rope_relative_position[256] PASSED              [ 50%]
+tests/test_rope.py::test_apply_rope_functional[64] PASSED                [ 50%]
+tests/test_rope.py::test_apply_rope_functional[128] PASSED               [ 51%]
+tests/test_rope.py::test_apply_rope_functional[256] PASSED               [ 52%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-64] PASSED   [ 52%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-128] PASSED  [ 53%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-256] PASSED  [ 53%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-1024] PASSED [ 54%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-64] PASSED   [ 55%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-128] PASSED  [ 55%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-256] PASSED  [ 56%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-1024] PASSED [ 57%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-64] PASSED   [ 57%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-128] PASSED  [ 58%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-256] PASSED  [ 58%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-1024] PASSED [ 59%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[1-64] PASSED    [ 60%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[1-128] PASSED   [ 60%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[1-256] PASSED   [ 61%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[2-64] PASSED    [ 61%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[2-128] PASSED   [ 62%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[2-256] PASSED   [ 63%]
+tests/test_rotation.py::test_cascaded_independence PASSED                [ 63%]
+tests/test_sign_array.py::test_sign_values_domain[64] PASSED             [ 64%]
+tests/test_sign_array.py::test_sign_values_domain[128] PASSED            [ 65%]
+tests/test_sign_array.py::test_sign_values_domain[256] PASSED            [ 65%]
+tests/test_sign_array.py::test_sign_values_domain[512] PASSED            [ 66%]
+tests/test_sign_array.py::test_deterministic_seed[64] PASSED             [ 66%]
+tests/test_sign_array.py::test_deterministic_seed[128] PASSED            [ 67%]
+tests/test_sign_array.py::test_deterministic_seed[256] PASSED            [ 68%]
+tests/test_sign_array.py::test_sign_inverse[64] PASSED                   [ 68%]
+tests/test_sign_array.py::test_sign_inverse[128] PASSED                  [ 69%]
+tests/test_sign_array.py::test_sign_inverse[256] PASSED                  [ 69%]
+tests/test_sign_array.py::test_llama_presets[256] PASSED                 [ 70%]
+tests/test_sign_array.py::test_apply_sign_broadcasting PASSED            [ 71%]
+tests/test_sota_snr_parity.py::test_dual_lut_snr_gain[3-128] PASSED      [ 71%]
+tests/test_sota_snr_parity.py::test_dual_lut_snr_gain[3-256] PASSED      [ 72%]
+tests/test_sota_snr_parity.py::test_dual_lut_snr_gain[4-128] PASSED      [ 73%]
+tests/test_sota_snr_parity.py::test_dual_lut_snr_gain[4-256] PASSED      [ 73%]
+tests/test_sota_snr_parity.py::test_block_128_compression_audit PASSED   [ 74%]
+tests/test_torture_quant.py::test_outlier_hell_key[4-128] PASSED         [ 74%]
+tests/test_torture_quant.py::test_outlier_hell_key[4-256] PASSED         [ 75%]
+tests/test_torture_quant.py::test_zero_variance_hell_value[64-128] PASSED [ 76%]
+tests/test_torture_quant.py::test_wht_precision_hell PASSED              [ 76%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-128-128-8-1] PASSED [ 77%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-128-128-8-2] PASSED [ 77%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-128-512-8-1] PASSED [ 78%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-128-512-8-2] PASSED [ 79%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-256-128-8-1] PASSED [ 79%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-256-128-8-2] PASSED [ 80%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-256-512-8-1] PASSED [ 80%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-256-512-8-2] PASSED [ 81%]
+tests/test_value_quantizer.py::test_value_quantize_basic[4-64] PASSED    [ 82%]
+tests/test_value_quantizer.py::test_value_quantize_basic[4-128] PASSED   [ 82%]
+tests/test_value_quantizer.py::test_value_quantize_basic[4-256] PASSED   [ 83%]
+tests/test_value_quantizer.py::test_value_quantize_basic[8-64] PASSED    [ 84%]
+tests/test_value_quantizer.py::test_value_quantize_basic[8-128] PASSED   [ 84%]
+tests/test_value_quantizer.py::test_value_quantize_basic[8-256] PASSED   [ 85%]
+tests/test_value_quantizer.py::test_value_group_quantize[32] PASSED      [ 85%]
+tests/test_value_quantizer.py::test_value_group_quantize[64] PASSED      [ 86%]
+tests/test_value_quantizer.py::test_value_extreme_torture_shifted[4] PASSED [ 87%]
+tests/test_value_quantizer.py::test_value_extreme_torture_shifted[8] PASSED [ 87%]
+tests/test_value_quantizer.py::test_value_extreme_torture_spiky PASSED   [ 88%]
+tests/test_value_quantizer.py::test_value_bit_perfect_packing_torture[4] PASSED [ 88%]
+tests/test_value_quantizer.py::test_value_bit_perfect_packing_torture[8] PASSED [ 89%]
+tests/test_value_quantizer.py::test_value_dtype_torture[dtype0] PASSED   [ 90%]
+tests/test_value_quantizer.py::test_value_dtype_torture[dtype1] PASSED   [ 90%]
+tests/test_wht.py::test_orthogonality[64] PASSED                         [ 91%]
+tests/test_wht.py::test_orthogonality[128] PASSED                        [ 92%]
+tests/test_wht.py::test_orthogonality[256] PASSED                        [ 92%]
+tests/test_wht.py::test_orthogonality[512] PASSED                        [ 93%]
+tests/test_wht.py::test_fwht_vs_naive[64] PASSED                         [ 93%]
+tests/test_wht.py::test_fwht_vs_naive[128] PASSED                        [ 94%]
+tests/test_wht.py::test_fwht_vs_naive[256] PASSED                        [ 95%]
+tests/test_wht.py::test_roundtrip[64] PASSED                             [ 95%]
+tests/test_wht.py::test_roundtrip[128] PASSED                            [ 96%]
+tests/test_wht.py::test_roundtrip[256] PASSED                            [ 96%]
+tests/test_wht.py::test_norm_preservation[64] PASSED                     [ 97%]
+tests/test_wht.py::test_norm_preservation[128] PASSED                    [ 98%]
+tests/test_wht.py::test_norm_preservation[256] PASSED                    [ 98%]
+tests/test_wht.py::test_dtype_preservation[dtype0] PASSED                [ 99%]
+tests/test_wht.py::test_dtype_preservation[dtype1] PASSED                [100%]
+
+=================================== FAILURES ===================================
+____________________ test_hybrid_precision_paged_attention _____________________
+
+    def test_hybrid_precision_paged_attention():
+        """
+        Test routing between Layer 0 (FP16) and Layer 1 (Quantized).
+        """
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dim, n_heads = 256, 4
+        head_dim = dim // n_heads # 64
+        tokens_per_block = 16
+    
+        config = TurboQuantConfig(n_head_protected=1) # Layer 0 is FP16
+        routing = LayerRouting(num_layers=4, exempt_layers=[0])
+        pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, tokens_per_block=tokens_per_block, device=device)
+    
+        # Layer 0: FP16
+        layer0 = TurboQuantAttention(config, layer_idx=0, total_layers=4, dim=dim, num_heads=n_heads, num_kv_heads=n_heads).to(device).half()
+        cache0 = TurboQuantKVCache(layer_idx=0, pool=pool, routing=routing)
+    
+        # Layer 1: Quantized
+        layer1 = TurboQuantAttention(config, layer_idx=1, total_layers=4, dim=dim, num_heads=n_heads, num_kv_heads=n_heads).to(device).half()
+        cache1 = TurboQuantKVCache(layer_idx=1, pool=pool, routing=routing)
+    
+        # Mock Inputs (Batch, Seq, Dim)
+        q = torch.randn(1, 1, dim, device=device, dtype=torch.float16)
+        k = torch.randn(1, 1, dim, device=device, dtype=torch.float16)
+        v = torch.randn(1, 1, dim, device=device, dtype=torch.float16)
+    
+        # 1. Forward Layer 0 (Should success)
+>       out0, _ = layer0(q, k, v, kv_cache=cache0)
+
+tests/test_architectural_branching.py:71: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+.venv/lib/python3.9/site-packages/torch/nn/modules/module.py:1773: in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+.venv/lib/python3.9/site-packages/torch/nn/modules/module.py:1784: in _call_impl
+    return forward_call(*args, **kwargs)
+src/turboquant/layers/attention_layer.py:84: in forward
+    out = paged_turboquant_attention(q, kv_cache)
+src/turboquant/kernels/paged_fused.py:167: in paged_turboquant_attention
+    return turboquant_paged_fused_attention(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+query = tensor([[[[ 0.5020,  0.3665, -0.0771, -0.2896, -0.1920,  0.7642, -0.9585,
+            0.1571,  0.2834, -0.1354,  0.532...3, -0.7993,  0.0709,
+            0.0471]]]], device='cuda:0', dtype=torch.float16,
+       grad_fn=<TransposeBackward0>)
+kv_cache = <turboquant.cache.manager.TurboQuantKVCache object at 0x74d44c553370>
+k_bits = 4, v_bits = 4, qjl_scale = 1.0, sm_scale = 0.125
+
+    def turboquant_paged_fused_attention(
+        query: torch.Tensor,
+        kv_cache: Any,
+        k_bits: int,
+        v_bits: int,
+        qjl_scale: float,
+        sm_scale: float
+    ) -> torch.Tensor:
+        # 1. Transform Query (Sketched Attention)
+>       q_rot, q_sketch = kv_cache.k_quantizer.transform_query(query)
+E       AttributeError: 'NoneType' object has no attribute 'transform_query'
+
+src/turboquant/kernels/paged_fused.py:111: AttributeError
+___________ TestPagedAttention.test_paged_vs_contiguous_parity[8-3] ____________
+
+self = <tests.test_paged_attention.TestPagedAttention object at 0x74d44e7ff850>
+k_bits = 8, v_bits = 3, seq_len = 200
+
+    @pytest.mark.parametrize("k_bits, v_bits", [(8, 3), (4, 4)])
+    def test_paged_vs_contiguous_parity(self, k_bits, v_bits, seq_len=200):
+        device = "cuda"
+        head_dim = 128
+        n_heads = 4
+        torch.manual_seed(42)
+    
+        # 1. Global Pool Initialization
+        # SOTA: Increase num_blocks to 20 to avoid exhaustion for 200 tokens (needs 13 blocks)
+        pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, k_bits=k_bits, v_bits=v_bits)
+    
+        # 2. Per-layer Cache Manager
+        # SOTA: Mark Layer 1 as quantized to ensure k_quantizer is initialized
+        kv_cache = TurboQuantKVCache(layer_idx=1, pool=pool, routing=LayerRouting(10, [1]))
+    
+        # 3. Fill Cache
+        k_full = torch.randn((1, n_heads, seq_len, head_dim), device=device)
+        v_full = torch.randn((1, n_heads, seq_len, head_dim), device=device)
+    
+        for i in range(seq_len):
+            kv_cache.append(k_full[:, :, i:i+1, :], v_full[:, :, i:i+1, :])
+    
+        expected_blocks = math.ceil(seq_len / kv_cache.tokens_per_block)
+        assert len(kv_cache.block_ids) == expected_blocks
+    
+        # 4. Run Paged Attention
+        query = torch.randn((1, n_heads, 1, head_dim), device=device)
+>       paged_output = kv_cache.attention_score(query)
+
+tests/test_paged_attention.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/turboquant/cache/manager.py:135: in attention_score
+    return paged_turboquant_attention(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+query = tensor([[[[-5.1875e-01,  1.2268e+00,  6.2548e-01, -9.1168e-01,  5.6868e-01,
+           -3.3367e-01,  5.5793e-02, -7.52...9456e+00,  1.7005e+00,  1.4610e+00, -3.5144e-01,
+           -1.5689e+00,  5.1381e-01,  2.1144e-01]]]], device='cuda:0')
+kv_cache = <turboquant.cache.manager.TurboQuantKVCache object at 0x74d44c47ac10>
+k_bits = 8, v_bits = 4, qjl_scale = 1.0, sm_scale = 0.08838834764831843
+
+    def paged_turboquant_attention(
+        query: torch.Tensor,
+        kv_cache: Any,
+        k_bits: int,
+        v_bits: int,
+        qjl_scale: float,
+        sm_scale: float,
+    ) -> torch.Tensor:
+        """
+        Consolidated Dispatcher for Paged Attention Path.
+        """
+        from turboquant.cache.routing import QuantizationStrategy
+        if kv_cache.strategy == QuantizationStrategy.FP16:
+            ptrs = kv_cache.get_paged_ptrs()
+            pool = ptrs["pool"]
+            block_table = ptrs["block_table"]
+            tokens_per_block = ptrs["tokens_per_block"]
+            num_tokens = ptrs["num_tokens"]
+    
+            if num_tokens == 0:
+                return torch.zeros_like(query)
+    
+            k_all = []
+            v_all = []
+            for i in range(num_tokens):
+                block_idx = i // tokens_per_block
+                slot_idx = i % tokens_per_block
+                physical_block = block_table[block_idx]
+                k_all.append(pool.k_fp16[physical_block, :, slot_idx])
+                v_all.append(pool.v_fp16[physical_block, :, slot_idx])
+    
+            k_cache = torch.stack(k_all, dim=1).unsqueeze(0)
+            v_cache = torch.stack(v_all, dim=1).unsqueeze(0)
+>           return torch.nn.functional.scaled_dot_product_attention(query, k_cache, v_cache)
+E           RuntimeError: Expected query, key, and value to have the same dtype, but got query.dtype: float key.dtype: c10::Half and value.dtype: c10::Half instead.
+
+src/turboquant/kernels/fused_attention.py:81: RuntimeError
+___________ TestPagedAttention.test_paged_vs_contiguous_parity[4-4] ____________
+
+self = <tests.test_paged_attention.TestPagedAttention object at 0x74d44e7ff9d0>
+k_bits = 4, v_bits = 4, seq_len = 200
+
+    @pytest.mark.parametrize("k_bits, v_bits", [(8, 3), (4, 4)])
+    def test_paged_vs_contiguous_parity(self, k_bits, v_bits, seq_len=200):
+        device = "cuda"
+        head_dim = 128
+        n_heads = 4
+        torch.manual_seed(42)
+    
+        # 1. Global Pool Initialization
+        # SOTA: Increase num_blocks to 20 to avoid exhaustion for 200 tokens (needs 13 blocks)
+        pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, k_bits=k_bits, v_bits=v_bits)
+    
+        # 2. Per-layer Cache Manager
+        # SOTA: Mark Layer 1 as quantized to ensure k_quantizer is initialized
+        kv_cache = TurboQuantKVCache(layer_idx=1, pool=pool, routing=LayerRouting(10, [1]))
+    
+        # 3. Fill Cache
+        k_full = torch.randn((1, n_heads, seq_len, head_dim), device=device)
+        v_full = torch.randn((1, n_heads, seq_len, head_dim), device=device)
+    
+        for i in range(seq_len):
+            kv_cache.append(k_full[:, :, i:i+1, :], v_full[:, :, i:i+1, :])
+    
+        expected_blocks = math.ceil(seq_len / kv_cache.tokens_per_block)
+        assert len(kv_cache.block_ids) == expected_blocks
+    
+        # 4. Run Paged Attention
+        query = torch.randn((1, n_heads, 1, head_dim), device=device)
+>       paged_output = kv_cache.attention_score(query)
+
+tests/test_paged_attention.py:40: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/turboquant/cache/manager.py:135: in attention_score
+    return paged_turboquant_attention(
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+query = tensor([[[[-5.1875e-01,  1.2268e+00,  6.2548e-01, -9.1168e-01,  5.6868e-01,
+           -3.3367e-01,  5.5793e-02, -7.52...9456e+00,  1.7005e+00,  1.4610e+00, -3.5144e-01,
+           -1.5689e+00,  5.1381e-01,  2.1144e-01]]]], device='cuda:0')
+kv_cache = <turboquant.cache.manager.TurboQuantKVCache object at 0x74d44c471eb0>
+k_bits = 8, v_bits = 4, qjl_scale = 1.0, sm_scale = 0.08838834764831843
+
+    def paged_turboquant_attention(
+        query: torch.Tensor,
+        kv_cache: Any,
+        k_bits: int,
+        v_bits: int,
+        qjl_scale: float,
+        sm_scale: float,
+    ) -> torch.Tensor:
+        """
+        Consolidated Dispatcher for Paged Attention Path.
+        """
+        from turboquant.cache.routing import QuantizationStrategy
+        if kv_cache.strategy == QuantizationStrategy.FP16:
+            ptrs = kv_cache.get_paged_ptrs()
+            pool = ptrs["pool"]
+            block_table = ptrs["block_table"]
+            tokens_per_block = ptrs["tokens_per_block"]
+            num_tokens = ptrs["num_tokens"]
+    
+            if num_tokens == 0:
+                return torch.zeros_like(query)
+    
+            k_all = []
+            v_all = []
+            for i in range(num_tokens):
+                block_idx = i // tokens_per_block
+                slot_idx = i % tokens_per_block
+                physical_block = block_table[block_idx]
+                k_all.append(pool.k_fp16[physical_block, :, slot_idx])
+                v_all.append(pool.v_fp16[physical_block, :, slot_idx])
+    
+            k_cache = torch.stack(k_all, dim=1).unsqueeze(0)
+            v_cache = torch.stack(v_all, dim=1).unsqueeze(0)
+>           return torch.nn.functional.scaled_dot_product_attention(query, k_cache, v_cache)
+E           RuntimeError: Expected query, key, and value to have the same dtype, but got query.dtype: float key.dtype: c10::Half and value.dtype: c10::Half instead.
+
+src/turboquant/kernels/fused_attention.py:81: RuntimeError
+=========================== short test summary info ============================
+FAILED tests/test_architectural_branching.py::test_hybrid_precision_paged_attention
+FAILED tests/test_paged_attention.py::TestPagedAttention::test_paged_vs_contiguous_parity[8-3]
+FAILED tests/test_paged_attention.py::TestPagedAttention::test_paged_vs_contiguous_parity[4-4]
+======================== 3 failed, 160 passed in 4.58s =========================

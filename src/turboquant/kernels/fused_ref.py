@@ -1,6 +1,6 @@
 import math
 import torch
-from ..quant.quantizer import MSEQuantized, ProdQuantized, unpack_indices
+from ..quant.quant_base import MSEQuantized, ProdQuantized, unpack_indices
 from ..ops.wht import fwht
 from ..ops.sign_array import apply_sign_array
 
@@ -58,7 +58,16 @@ def attention_score_prod(
     sign_float = k_qjl_signs.float() * 2.0 - 1.0
     qjl_dot = torch.matmul(q_qjl_projected, sign_float.transpose(-2, -1).to(q_qjl_projected.dtype))
     
-    qjl_factor = math.sqrt(math.pi / 2.0) / block_size
-    scores_qjl = qjl_factor * qjl_dot * quantized_key.residual_norms.unsqueeze(-2)
+    qjl_factor = math.sqrt(math.pi / 2.0) / math.sqrt(block_size)
+    # SOTA: Broadcast residual norms correctly across query tokens.
+    # qjl_dot shape: (..., n_q, n_k)
+    # residual_norms shape: (n_k, n_heads, num_groups)
+    res_norms = quantized_key.residual_norms.mean(dim=-1) # (n_k, n_heads)
+    
+    # Standardize to (n_heads, 1, n_k) for clean broadcasting with (n_heads, n_q, n_k)
+    if res_norms.ndim == 2:
+        res_norms = res_norms.transpose(0, 1).unsqueeze(-2)
+        
+    scores_qjl = qjl_factor * qjl_dot * res_norms
 
     return (scores_mse + scores_qjl) * scale

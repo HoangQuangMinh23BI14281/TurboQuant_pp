@@ -1,7 +1,7 @@
 import torch
 import math
 import pytest
-from turboquant.quant.quantizer import TurboQuantProd, TurboQuantMSE
+from turboquant.quant.key_quantizer import TurboQuantProd, TurboQuantMSE
 from turboquant.kernels.fused_attention import attention_score_prod, attention_score_mse, turboquant_attention
 
 

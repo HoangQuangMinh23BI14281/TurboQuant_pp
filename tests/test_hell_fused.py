@@ -38,7 +38,7 @@ class TestHellFused:
         
         # 4. Run Fused Attention (Triton)
         # Should NOT return NaN despite exp(12800) being inf
-        output, _ = turboquant_attention(query, q_key, q_value, quantizer=k_quant, scale=1.0)
+        output, _ = turboquant_attention(query, q_key, q_value, quantizer=k_quant, sm_scale=1.0)
         
         assert not torch.isnan(output).any(), "Softmax stability failed: NaN detected in output!"
         assert not torch.isinf(output).any(), "Softmax stability failed: Inf detected in output!"

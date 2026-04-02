@@ -15,7 +15,7 @@ class TurboQuantMSE(nn.Module):
     TurboQuant MSE-optimal quantizer (Algorithm 1) for K or V.
     Standardized to 128 block size with cascaded SRHT.
     """
-    def __init__(self, dim: int, bits: int, n_rotation_passes: int = 2):
+    def __init__(self, dim: int, bits: int = 8, n_rotation_passes: int = 2):
         super().__init__()
         self.dim = dim
         self.bits = bits
@@ -131,7 +131,7 @@ class TurboQuantProd(nn.Module):
     """
     TurboQuant inner-product-optimal quantizer (Algorithm 2) for K.
     """
-    def __init__(self, dim: int, bits: int, n_rotation_passes: int = 2):
+    def __init__(self, dim: int, bits: int = 8, n_rotation_passes: int = 2):
         super().__init__()
         assert bits >= 2
         self.dim = dim
@@ -142,7 +142,7 @@ class TurboQuantProd(nn.Module):
 
         qjl_signs = generate_sign_array(self.block_size, use_llama_preset='qjl')
         self.register_buffer('qjl_signs', qjl_signs)
-        self.qjl_scale = math.sqrt(math.pi / 2.0) / self.block_size
+        self.qjl_scale = math.sqrt(math.pi / 2.0) / math.sqrt(self.block_size)
 
     def transform_query(self, query: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         q_rot = self.mse_quantizer.transform_query(query)

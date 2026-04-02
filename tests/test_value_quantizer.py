@@ -1,7 +1,8 @@
 import torch
 import pytest
 import math
-from turboquant.quant.quantizer import TurboQuantValue, ValueQuantized
+from turboquant.quant.value_quantizer import TurboQuantValue
+from turboquant.quant.quant_base import ValueQuantized, pack_indices, unpack_indices
 
 @pytest.mark.parametrize("dim", [64, 128, 256])
 @pytest.mark.parametrize("bits", [4, 8])

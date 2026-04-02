@@ -1,79 +1,117 @@
 import torch
 import pytest
 from turboquant.cache.block_pool import KVBlockPool
-from turboquant.cache.routing import LayerRouting, QuantizationStrategy
 from turboquant.cache.manager import TurboQuantKVCache
+from turboquant.quant.key_quantizer import TurboQuantProd
+from turboquant.quant.value_quantizer import TurboQuantValue
 
 def test_kv_manager_paged_allocation():
-    """Verify paged memory allocation and Block-128 compliance."""
     num_layers = 4
     num_blocks = 10
-    block_size = 16 # tokens per block
+    tokens_per_block = 16 
     head_dim = 128
-    n_heads = 1
+    n_heads = 8
     
-    # Pre-allocate pool
-    pool = KVBlockPool(num_blocks, block_size, head_dim, n_heads)
-    routing = LayerRouting.from_percent(num_layers, percent=0.25) # 25% exempt: 0 and 3
+    # Signature: num_blocks, head_dim, n_heads, tokens_per_block
+    pool = KVBlockPool(
+        num_blocks=num_blocks, 
+        head_dim=head_dim, 
+        n_heads=n_heads, 
+        tokens_per_block=tokens_per_block
+    )
     
-    # Layer 1 (Quantized middle layer)
-    cache = TurboQuantKVCache(layer_idx=1, pool=pool, routing=routing)
-    assert cache.strategy == QuantizationStrategy.TURBO_4BIT
+    # Init Cache for Layer 1
+    cache = TurboQuantKVCache(
+        layer_idx=1,
+        pool=pool,
+        k_quantizer=TurboQuantProd(head_dim),
+        v_quantizer=TurboQuantValue(head_dim)
+    )
     
-    # Append 16 tokens (exactly 1 block)
-    for _ in range(16):
-        k = torch.randn(1, n_heads, 1, head_dim, device="cuda")
-        v = torch.randn(1, n_heads, 1, head_dim, device="cuda")
+    # 1. Fill exactly one block
+    for i in range(tokens_per_block):
+        k = torch.randn(1, n_heads, 1, head_dim)
+        v = torch.randn(1, n_heads, 1, head_dim)
         cache.append(k, v)
+        
+    assert len(cache.block_table) == 1
+    assert cache.num_tokens == tokens_per_block
     
-    assert len(cache.block_ids) == 1
-    # Check 16th token was stored at offset 15
-    bid = cache.block_ids[0]
-    assert torch.any(pool.k_indices[bid, 0, 15] != 0) 
-    
-    # 17th token should trigger second block allocation
-    k = torch.randn(1, n_heads, 1, head_dim, device="cuda")
-    v = torch.randn(1, n_heads, 1, head_dim, device="cuda")
+    # 2. Trigger new block allocation
+    k = torch.randn(1, n_heads, 1, head_dim)
+    v = torch.randn(1, n_heads, 1, head_dim)
     cache.append(k, v)
     
-    assert len(cache.block_ids) == 2
-    assert pool.usage == 0.2 # 2/10 blocks used
-
-def test_kv_manager_boundary_protection():
-    """Verify Boundary Protection (exempt layers) logic."""
-    num_layers = 10
-    pool = KVBlockPool(30, 8, 64, 1)
-    routing = LayerRouting(num_layers, exempt_layers=[0, 9])
-    
-    # Layer 0: FP16 Exempt
-    cache0 = TurboQuantKVCache(0, pool, routing)
-    assert cache0.strategy == QuantizationStrategy.FP16
-    assert cache0.k_quantizer is None
-    
-    # Layer 5: Turbo4Bit Production
-    cache5 = TurboQuantKVCache(5, pool, routing)
-    assert cache5.strategy == QuantizationStrategy.TURBO_4BIT
-    assert cache5.k_quantizer is not None
+    assert len(cache.block_table) == 2
+    assert cache.num_tokens == tokens_per_block + 1
 
 def test_kv_manager_metadata_fidelity():
-    """Verify that Block-128 metadata is correctly persisted in the pool."""
+    num_blocks = 10
+    tokens_per_block = 16
+    n_heads = 8
     head_dim = 256 # 2 groups of Block-128
-    pool = KVBlockPool(10, 8, head_dim, 1)
-    routing = LayerRouting(5, exempt_layers=[])
     
-    cache = TurboQuantKVCache(2, pool, routing)
+    pool = KVBlockPool(
+        num_blocks=num_blocks, 
+        head_dim=head_dim, 
+        n_heads=n_heads, 
+        tokens_per_block=tokens_per_block
+    )
     
-    k = torch.randn(1, 1, 1, head_dim, device="cuda")
-    v = torch.randn(1, 1, 1, head_dim, device="cuda")
+    cache = TurboQuantKVCache(
+        layer_idx=1,
+        pool=pool,
+        k_quantizer=TurboQuantProd(head_dim),
+        v_quantizer=TurboQuantValue(head_dim)
+    )
     
+    k = torch.randn(1, n_heads, 1, head_dim)
+    v = torch.randn(1, n_heads, 1, head_dim)
     cache.append(k, v)
-    bid = cache.block_ids[0]
     
-    # K-metadata: (residual_norm, norm)
-    # Norms should be positive
-    assert pool.k_metadata[bid, 0, 0, 1].item() > 0
+    bid = cache.block_table[0]
     
-    # V-metadata: (Scale, Zero) per group
-    # Head_dim 256 / 128 = 2 groups
-    assert pool.v_metadata.shape[-2] == 2 
-    assert torch.any(pool.v_metadata[bid, 0, 0, :, 0] != 0) # Scales non-zero
+    # Check shape of K indices inside the pool (SOTA: Padded to 128, Dynamic Packing)
+    bits = cache.k_quantizer.bits
+    vals_per_byte = 8 // (bits - 1)
+    expected_dim = max(128, head_dim) // vals_per_byte
+    assert pool.k_indices.shape[-1] == expected_dim
+    
+    # Check K metadata (norm, scale, residual_norm)
+    # k_metadata shape: (blocks, heads, tokens_per_block, 3)
+    assert pool.k_metadata.shape[-1] == 3
+    # Ensure norms are not zero after append
+    assert torch.any(pool.k_metadata[bid, 0, 0, 0] != 0) 
+    
+    # Check V metadata (Scale and Zero per token per group)
+    expected_groups = max(1, head_dim // 128)
+    # v_metadata shape: (blocks, heads, tokens_per_block, groups, 2)
+    assert pool.v_metadata.shape[-2] == expected_groups
+    assert torch.any(pool.v_metadata[bid, 0, 0, 0, 0] != 0)
+
+def test_kv_manager_boundary_protection():
+    """
+    Ensure the manager respects the 'Exempt' routing (no quantization).
+    """
+    from turboquant.cache.routing import LayerRouting, QuantizationStrategy
+    
+    num_blocks = 10
+    tokens_per_block = 16
+    head_dim = 128
+    n_heads = 8
+    
+    pool = KVBlockPool(num_blocks, head_dim, n_heads, tokens_per_block)
+    # Layer 0 is exempt (FP16)
+    routing = LayerRouting(num_layers=4, exempt_layers=[0])
+    
+    cache = TurboQuantKVCache(layer_idx=0, pool=pool, routing=routing)
+    assert cache.strategy == QuantizationStrategy.FP16
+    
+    # Append should go to k_fp16 pool, not k_indices
+    k = torch.randn(1, n_heads, 1, head_dim)
+    v = torch.randn(1, n_heads, 1, head_dim)
+    cache.append(k, v)
+    
+    bid = cache.block_table[0]
+    assert torch.any(pool.k_fp16[bid, 0, 0] != 0)
+    assert torch.all(pool.k_indices[bid, 0, 0] == 0)

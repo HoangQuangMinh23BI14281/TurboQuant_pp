@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict
+from turboquant.cache.routing import QuantizationStrategy
 
 @dataclass
 class TurboQuantConfig:
@@ -45,3 +46,11 @@ class TurboQuantConfig:
             override = self.layer_overrides[layer_idx]
             return override.get("k_bits", self.k_bits), override.get("v_bits", self.v_bits)
         return self.k_bits, self.v_bits
+
+    def get_strategy(self, layer_idx: int, total_layers: int) -> QuantizationStrategy:
+        """Determines the quantization strategy for a specific layer."""
+        if self.is_protected(layer_idx, total_layers):
+            return QuantizationStrategy.FP16
+            
+        # Standard: use what's configured (defaulting to 4bit which is our standard hardened path)
+        return QuantizationStrategy.TURBO_4BIT

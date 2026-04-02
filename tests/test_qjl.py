@@ -1,7 +1,8 @@
 import torch
 import math
 import pytest
-from turboquant.quant.quantizer import TurboQuantProd, MSEQuantized, ProdQuantized
+from turboquant.quant.key_quantizer import TurboQuantProd, TurboQuantMSE
+from turboquant.quant.quant_base import MSEQuantized
 from turboquant.kernels.fused_attention import attention_score_prod
 
 @pytest.mark.parametrize("d", [128, 256])

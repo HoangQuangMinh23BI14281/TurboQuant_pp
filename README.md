@@ -99,7 +99,10 @@ Hợp nhất (Fuse) toàn bộ quy trình trên vào một nhân (Kernel) CUDA/T
 
 
 
-rsync -a --exclude='.venv' --exclude='__pycache__' /mnt/c/Users/ADMIN/OneDrive/Desktop/turboquant_pp/ ~/projects/turboquant_pp/
+Desktop/turboquant_pp/ ~/projects/turboquant_pp/
 cd ~/projects/turboquant_pp
+rsync -a --exclude='.venv' --exclude='__pycache__' /mnt/c/Users/ADMIN/OneDrive/Desktop/turboquant_pp
 uv sync
 uv run python -m pytest -v
+
+wsl bash -c "export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/minh/.local/bin'; rm -rf ~/.triton && rsync -a --delete --exclude='.venv' --exclude='__pycache__' /mnt/c/Users/ADMIN/OneDrive/Desktop/turboquant_pp/ ~/projects/turboquant_pp/ && cd ~/projects/turboquant_pp && export PYTHONPATH=. && uv run python -m pytest -v"

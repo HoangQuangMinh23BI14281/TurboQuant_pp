@@ -2,7 +2,19 @@ import torch
 from .triton_mse import turboquant_mse_score
 from .triton_qjl import turboquant_qjl_score
 from .triton_fused import turboquant_fused_decode, _turboquant_fused_decode_kernel
-from .triton_utils import _get_packing_params
+
+def _get_packing_params(bits: int):
+    """
+    Determines packing configuration for quantized indices.
+    """
+    if bits == 1:
+        return 1, 8
+    elif bits == 2:
+        return 2, 4
+    elif bits <= 4:
+        return bits, 8 // bits
+    else:
+        return 8, 1
 
 # This file acts as a legacy gateway and central dispatcher for Triton kernels.
 # All actual kernel logic has been moved to:

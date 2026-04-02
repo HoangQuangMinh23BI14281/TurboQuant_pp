@@ -1,7 +1,7 @@
 import torch
 import pytest
-from src.turboquant.layers.config import TurboQuantConfig
-from src.turboquant.layers.attention_layer import TurboQuantAttention
+from turboquant.layers.config import TurboQuantConfig
+from turboquant.layers.attention_layer import TurboQuantAttention
 
 def test_boundary_layer_protection():
     """
@@ -50,9 +50,9 @@ def test_hybrid_precision_forward():
                                 dim=dim, num_heads=num_heads, num_kv_heads=num_heads).to(device)
     
     # Mock data (Batch, N, Dim)
-    q = torch.randn((1, 1, head_dim), device=device)
-    k = torch.randn((1, 32, head_dim), device=device)
-    v = torch.randn((1, 32, head_dim), device=device)
+    q = torch.randn((1, 1, dim), device=device)
+    k = torch.randn((1, 32, dim), device=device)
+    v = torch.randn((1, 32, dim), device=device)
     
     # Run forward
     output, weights = layer(q, k, v)

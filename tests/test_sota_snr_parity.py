@@ -2,7 +2,8 @@ import torch
 import math
 import pytest
 import numpy as np
-from turboquant.quant.quantizer import TurboQuantValue, ValueQuantized
+from turboquant.quant.key_quantizer import TurboQuantProd, TurboQuantMSE
+from turboquant.quant.value_quantizer import TurboQuantValue
 from turboquant.quant.lloyd_max import lloyd_max_quantize, lloyd_max_dequantize
 
 def calculate_snr(original: torch.Tensor, reconstructed: torch.Tensor) -> float:

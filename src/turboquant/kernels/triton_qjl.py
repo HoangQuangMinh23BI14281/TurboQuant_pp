@@ -5,27 +5,27 @@ from typing import Optional
 
 @triton.jit
 def _turboquant_qjl_score_kernel(
-    Q_SKETCH_ptr,    # (BH, D) pre-sketched query (q @ S^T)
-    SIGNS_ptr,       # (BH, N, packed_d_signs) packed sign bits
-    RES_NORMS_ptr,   # (BH, N) residual norms
-    NORMS_ptr,       # (BH, N) key norms
-    OUT_ptr,         # (BH, N) output QJL scores (added to existing)
+    Q_SKETCH_ptr,    # (BH_q, D) pre-sketched query
+    SIGNS_ptr,       # (BH_k, N, packed_d_signs) packed sign bits
+    RES_NORMS_ptr,   # (BH_k, N) residual norms
+    OUT_ptr,         # (BH_q, N) output QJL scores
     # Strides
     stride_qs_bh, stride_qs_d,
     stride_s_bh, stride_s_n, stride_s_d,
     stride_rn_bh, stride_rn_n,
-    stride_n_bh, stride_n_n,
     stride_o_bh, stride_o_n,
     # Dims
-    N,
-    D: tl.constexpr,
-    PACKED_D_SIGNS: tl.constexpr,  # D // 8
-    QJL_SCALE,  # qjl_factor
-    # Block sizes
+    N, D: tl.constexpr,
+    PACKED_D_SIGNS: tl.constexpr,
+    NQ: tl.constexpr, # Number of queries per key head
+    QJL_SCALE,
     BLOCK_N: tl.constexpr,
 ):
     pid_bh = tl.program_id(0)
     pid_n = tl.program_id(1)
+
+    # Decode head mapping
+    key_bh_idx = pid_bh // NQ
 
     n_start = pid_n * BLOCK_N
     n_offs = n_start + tl.arange(0, BLOCK_N)
@@ -36,7 +36,7 @@ def _turboquant_qjl_score_kernel(
 
     for byte_idx in range(PACKED_D_SIGNS):
         packed = tl.load(
-            SIGNS_ptr + pid_bh * stride_s_bh + n_offs * stride_s_n + byte_idx * stride_s_d,
+            SIGNS_ptr + key_bh_idx * stride_s_bh + n_offs * stride_s_n + byte_idx * stride_s_d,
             mask=n_mask, other=0
         ).to(tl.int32)
 
@@ -48,7 +48,7 @@ def _turboquant_qjl_score_kernel(
                 q_val = tl.load(Q_SKETCH_ptr + pid_bh * stride_qs_bh + coord_idx * stride_qs_d).to(tl.float32)
                 dot += q_val * sign_val
 
-    res_norms = tl.load(RES_NORMS_ptr + pid_bh * stride_rn_bh + n_offs * stride_rn_n, mask=n_mask, other=0.0).to(tl.float32)
+    res_norms = tl.load(RES_NORMS_ptr + key_bh_idx * stride_rn_bh + n_offs * stride_rn_n, mask=n_mask, other=0.0).to(tl.float32)
     qjl_scores = dot * res_norms * QJL_SCALE
 
     # Add to existing scores
@@ -59,7 +59,7 @@ def turboquant_qjl_score(
     q_sketched: torch.Tensor,
     qjl_signs: torch.Tensor,
     residual_norms: torch.Tensor,
-    norms: torch.Tensor,
+    norms: torch.Tensor, # Unused here but kept for signature compatibility
     qjl_scale: float,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
@@ -73,8 +73,6 @@ def turboquant_qjl_score(
     
     if residual_norms.dim() == 1:
         residual_norms = residual_norms.unsqueeze(0)
-    if norms.dim() == 1:
-        norms = norms.unsqueeze(0)
 
     BH, D = q_sketched.shape
     N = qjl_signs.shape[1]
@@ -90,11 +88,10 @@ def turboquant_qjl_score(
     grid = (BH, triton.cdiv(N, BLOCK_N))
 
     _turboquant_qjl_score_kernel[grid](
-        q_sketched, qjl_signs, residual_norms, norms, out,
+        q_sketched, qjl_signs, residual_norms, out,
         q_sketched.stride(0), q_sketched.stride(1),
         qjl_signs.stride(0), qjl_signs.stride(1), qjl_signs.stride(2),
         residual_norms.stride(0), residual_norms.stride(1),
-        norms.stride(0), norms.stride(1),
         out.stride(0), out.stride(1),
         N=N, D=D, PACKED_D_SIGNS=packed_d_signs, NQ=NQ,
         QJL_SCALE=qjl_scale,
