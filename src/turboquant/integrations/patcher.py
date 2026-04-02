@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, Type
+from typing import Optional, Dict, Any, Type, Tuple
 import logging
 
 from turboquant.layers.attention_layer import TurboQuantAttention
@@ -39,14 +39,25 @@ def patch_hf_model(model: nn.Module, tq_config: Optional[TurboQuantConfig] = Non
     for name, module in model.named_modules():
         if any(cls in str(type(module)) for cls in target_classes):
             # Create our SOTA layer
+            dim = getattr(module, "hidden_size", model.config.hidden_size)
+            num_heads = getattr(module, "num_heads", model.config.num_attention_heads)
+            num_kv_heads = getattr(module, "num_key_value_heads", getattr(model.config, "num_key_value_heads", num_heads))
+
             new_layer = TurboQuantAttention(
-                config=tq_config,
+                tq_config=tq_config,
                 layer_idx=current_idx,
                 total_layers=total_layers,
-                dim=module.hidden_size,
-                num_heads=module.num_heads,
-                num_kv_heads=module.num_key_value_heads,
+                dim=dim,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
             ).to(module.q_proj.weight.device).to(module.q_proj.weight.dtype)
+            
+            # SOTA: Inject HF Model Config for ROPE and other logic compatibility
+            new_layer.config = model.config
+            
+            # Transfer ROPE
+            if hasattr(module, "rotary_emb"):
+                new_layer.rotary_emb = module.rotary_emb
             
             # Transfer Weights
             new_layer.q_proj.weight.data.copy_(module.q_proj.weight.data)
@@ -96,16 +107,17 @@ def _wrap_hf_forward(layer: TurboQuantAttention):
             tq_cache = past_key_value
         
         # 2. Run SOTA Kernel
-        # hidden_states is already q/k/v for input in this context
         attn_output, _ = original_forward(
             query=hidden_states,
             key=hidden_states,
             value=hidden_states,
             kv_cache=tq_cache,
-            mask=attention_mask
+            mask=attention_mask,
+            position_ids=position_ids
         )
         
-        # 3. Handle HF Return Format (Output, AttnProb, Cache)
-        return attn_output, None, tq_cache
+        # 3. Handle HF Return Format (Output, AttnProb)
+        # Modern HF (v4.36+) expects 2 values if using Cache object
+        return attn_output, None
 
     layer.forward = hf_forward

@@ -17,7 +17,7 @@ class TurboQuantAttention(nn.Module):
     """
     def __init__(
         self,
-        config: TurboQuantConfig,
+        tq_config: TurboQuantConfig,
         layer_idx: int,
         total_layers: int,
         dim: int,
@@ -25,7 +25,7 @@ class TurboQuantAttention(nn.Module):
         num_kv_heads: int,
     ):
         super().__init__()
-        self.config = config
+        self.tq_config = tq_config
         self.layer_idx = layer_idx
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -39,10 +39,10 @@ class TurboQuantAttention(nn.Module):
         self.o_proj = nn.Linear(dim, dim, bias=False)
         
         # 2. Strategy-based Quantization
-        strategy = config.get_strategy(layer_idx, total_layers)
+        strategy = tq_config.get_strategy(layer_idx, total_layers)
         self.is_protected = (strategy == QuantizationStrategy.FP16)
-        self.k_bits = config.k_bits if not self.is_protected else 16
-        self.v_bits = config.v_bits if not self.is_protected else 16
+        self.k_bits = tq_config.k_bits if not self.is_protected else 16
+        self.v_bits = tq_config.v_bits if not self.is_protected else 16
         
         # 3. Local Quantizers (Conditional)
         if not self.is_protected:
@@ -51,6 +51,8 @@ class TurboQuantAttention(nn.Module):
         else:
             self.k_quantizer = None
             self.v_quantizer = None
+        # SOTA: RoPE Support (Injected by Patcher)
+        self.rotary_emb = None
         
     def forward(
         self,
@@ -59,6 +61,7 @@ class TurboQuantAttention(nn.Module):
         value: torch.Tensor,
         kv_cache: Optional[TurboQuantKVCache] = None,
         mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Input query shape: (batch, seq, dim)
@@ -76,6 +79,20 @@ class TurboQuantAttention(nn.Module):
         k = k.view(batch, seq_k, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch, seq_k, self.num_kv_heads, self.head_dim).transpose(1, 2)
         
+        # 3. Apply SOTA RoPE
+        if self.rotary_emb is not None and position_ids is not None:
+            # Note: Many modern HF models use self.rotary_emb(v_proj_output, position_ids) 
+            # to get cos/sin, then apply it to q/k.
+            cos, sin = self.rotary_emb(v, position_ids)
+            
+            # Helper to rotate 2D part
+            def _rotate_half(x):
+                x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+                return torch.cat((-x2, x1), dim=-1)
+
+            q = (q * cos) + (_rotate_half(q) * sin)
+            k = (k * cos) + (_rotate_half(k) * sin)
+
         if kv_cache is not None:
             # Update quantizers in cache manager
             kv_cache.k_quantizer = self.k_quantizer
@@ -101,7 +118,12 @@ class TurboQuantAttention(nn.Module):
             return self.o_proj(out), None
             
         else:
-            # Fallback path (Standard Attention)
+            # Standard Attention (Fallback/Prefill)
+            if self.num_heads != self.num_kv_heads:
+                # GQA: Repeat KV heads
+                k = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+                v = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+            
             out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
             # Reshape back to (batch, seq, dim) before projection
             out = out.transpose(1, 2).contiguous().view(batch, seq_q, self.dim)

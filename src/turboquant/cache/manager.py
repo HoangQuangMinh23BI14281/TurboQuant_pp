@@ -5,7 +5,15 @@ from typing import Dict, List, Optional, Tuple
 from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.routing import LayerRouting, QuantizationStrategy
 
-class TurboQuantKVCache:
+try:
+    from transformers.cache_utils import Cache
+    HAS_TRANSFORMERS = True
+except ImportError:
+    # Shim if transformers is not installed
+    class Cache: pass
+    HAS_TRANSFORMERS = False
+
+class TurboQuantKVCache(Cache):
     """
     Paged KV Cache Manager for TurboQuant++.
     Orchestrates memory allocation across KVBlockPool and handles 
@@ -61,6 +69,25 @@ class TurboQuantKVCache:
         self.block_table: List[int] = [] # sequence of physical block IDs
         self.block_ids = self.block_table # Alias for test compatibility
         self.num_tokens = 0
+        self.layers = [] # Transformers Cache shim
+        
+    # --- Transformers Cache Interface Sim ---
+    def get_seq_length(self, layer_idx: Optional[int] = None) -> int:
+        return self.num_tokens
+
+    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = None) -> int:
+        return self.num_tokens
+
+    def get_mask_size(self, layer_idx: Optional[int] = None) -> int:
+        # For causal masking, mask size is the total sequence length
+        return self.num_tokens
+    
+    def get_max_length(self) -> Optional[int]:
+        return self.pool.num_blocks * self.tokens_per_block
+
+    @property
+    def is_compileable(self) -> bool:
+        return False
         
     def append(self, k: torch.Tensor, v: torch.Tensor):
         """
