@@ -43,6 +43,7 @@ def _turboquant_paged_fused_kernel(
     K_BITS, K_VALS_PER_BYTE,
     V_BITS, V_VALS_PER_BYTE,
     N_HEADS: tl.constexpr,
+    N_KV_HEADS: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     QJL_SCALE, SM_SCALE,
@@ -51,6 +52,7 @@ def _turboquant_paged_fused_kernel(
 ):
     pid_bh = tl.program_id(0)
     pid_h = pid_bh % N_HEADS
+    pid_kv_h = pid_h // (N_HEADS // N_KV_HEADS)
     
     d_range = tl.arange(0, 128)
     d_mask = d_range < D
@@ -71,8 +73,9 @@ def _turboquant_paged_fused_kernel(
         p_idx = start_n // BLOCK_SIZE
         pb_id = tl.load(BLOCK_TABLE_ptr + p_idx, mask=(start_n < N))
         
-        k_min = tl.load(K_SUMMARIES_ptr + pb_id * stride_sum_b + pid_h * stride_sum_h + 0 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
-        k_max = tl.load(K_SUMMARIES_ptr + pb_id * stride_sum_b + pid_h * stride_sum_h + 1 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
+        # SOTA: GQA-Aware Fetching
+        k_min = tl.load(K_SUMMARIES_ptr + pb_id * stride_sum_b + pid_kv_h * stride_sum_h + 0 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
+        k_max = tl.load(K_SUMMARIES_ptr + pb_id * stride_sum_b + pid_kv_h * stride_sum_h + 1 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
         
         # Upper bound: sum(max(q_i * min_i, q_i * max_i))
         q_min = q_rot * k_min
@@ -84,9 +87,9 @@ def _turboquant_paged_fused_kernel(
             slot_indices = n_range - (block_indices * BLOCK_SIZE)
             physical_block_ids = tl.load(BLOCK_TABLE_ptr + block_indices, mask=n_mask, other=0)
             
-            k_byte_base = K_INDICES_ptr + physical_block_ids[:, None] * stride_k_index_b + pid_h * stride_k_index_h
-            k_sig_base = K_SIGNS_ptr + physical_block_ids[:, None] * stride_k_signs_b + pid_h * stride_k_signs_h
-            k_met_base = K_METADATA_ptr + physical_block_ids[:, None] * stride_k_meta_b + pid_h * stride_k_meta_h
+            k_byte_base = K_INDICES_ptr + physical_block_ids[:, None] * stride_k_index_b + pid_kv_h * stride_k_index_h
+            k_sig_base = K_SIGNS_ptr + physical_block_ids[:, None] * stride_k_signs_b + pid_kv_h * stride_k_signs_h
+            k_met_base = K_METADATA_ptr + physical_block_ids[:, None] * stride_k_meta_b + pid_kv_h * stride_k_meta_h
             
             # Load packed K indices and signs
             k_byte_idx = d_range // K_VALS_PER_BYTE
@@ -115,10 +118,10 @@ def _turboquant_paged_fused_kernel(
             
             # 2. H2O: Importance Accumulation
             block_importance = tl.sum(p)
-            tl.atomic_add(BLOCK_IMPORTANCE_ptr + pb_id * stride_imp_b + pid_h * stride_imp_h, block_importance)
+            tl.atomic_add(BLOCK_IMPORTANCE_ptr + pb_id * stride_imp_b + pid_kv_h * stride_imp_h, block_importance)
 
-            v_idx_base = V_INDICES_ptr + physical_block_ids[:, None] * stride_v_index_b + pid_h * stride_v_index_h
-            v_met_base = V_METADATA_ptr + physical_block_ids[:, None] * stride_v_meta_b + pid_h * stride_v_meta_h
+            v_idx_base = V_INDICES_ptr + physical_block_ids[:, None] * stride_v_index_b + pid_kv_h * stride_v_index_h
+            v_met_base = V_METADATA_ptr + physical_block_ids[:, None] * stride_v_meta_b + pid_kv_h * stride_v_meta_h
             
             v_byte_idx = d_range // V_VALS_PER_BYTE
             v_sub_idx = d_range % V_VALS_PER_BYTE
@@ -202,10 +205,10 @@ def turboquant_paged_fused_attention(
         context_len, D,
         pool.k_indices.shape[-1], pool.k_qjl.shape[-1], pool.v_indices.shape[-1],
         k_bits, k_vpb, v_bits, v_vpb,
-        kv_cache.n_heads, 128, tokens_per_block,
+        n_heads, kv_cache.n_kv_heads, kv_cache.group_size, tokens_per_block,
         qjl_scale, sm_scale, 
         quest_threshold,
-        BLOCK_N=64, num_warps=4
+        128, num_warps=4
     )
     
     if D > kv_cache.head_dim:

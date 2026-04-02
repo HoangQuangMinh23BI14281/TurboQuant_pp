@@ -23,9 +23,11 @@ class TurboQuantKVCache:
         self.pool = pool
         self.device = pool.device
         self.dtype = pool.dtype
-        self.n_heads = pool.n_heads
+        self.n_kv_heads = pool.n_heads
+        self.n_heads = pool.n_heads # Default for standard attention
         self.head_dim = pool.head_dim
         self.tokens_per_block = pool.tokens_per_block
+        self.group_size = 1 # Default for standard attention
         
         # Strategy assignment
         self.routing = routing or LayerRouting(pool.num_blocks) # Dummy routing if none
