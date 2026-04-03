@@ -47,27 +47,27 @@ def attention_score_prod(
     scores_mse = torch.matmul(query.float(), keys_mse.float().transpose(-2, -1))
 
     # Term 2: QJL correction
-    q_rotated = quantizer.mse_quantizer.transform_query(query)
-    q_signed = apply_sign_array(q_rotated, quantizer.qjl_signs)
-    q_qjl_projected = fwht(q_signed)
-
+    q_rotated, q_qjl_projected = quantizer.transform_query(query)
+    
     k_qjl_signs = quantized_key.qjl_signs
     if quantized_key.packed:
         k_qjl_signs = unpack_indices(k_qjl_signs, 1, block_size)
     
-    sign_float = k_qjl_signs.float() * 2.0 - 1.0
-    qjl_dot = torch.matmul(q_qjl_projected, sign_float.transpose(-2, -1).to(q_qjl_projected.dtype))
+    sign_float = k_qjl_signs.float() * 2.0 - 1.0 # (n_k, d) or (batch, heads, n_k, d)
     
-    qjl_factor = math.sqrt(math.pi / 2.0) / math.sqrt(block_size)
-    # SOTA: Broadcast residual norms correctly across query tokens.
-    # qjl_dot shape: (..., n_q, n_k)
-    # residual_norms shape: (n_k, n_heads, num_groups)
-    res_norms = quantized_key.residual_norms.mean(dim=-1) # (n_k, n_heads)
+    # Matching Triton accumulation: Dot(Sketch_Q, Signs_K)
+    # q_qjl_projected: (..., n_q, d)
+    # sign_float: (..., n_k, d)
+    qjl_dot = torch.matmul(q_qjl_projected.to(torch.float32), sign_float.transpose(-1, -2).to(torch.float32))
     
-    # Standardize to (n_heads, 1, n_k) for clean broadcasting with (n_heads, n_q, n_k)
-    if res_norms.ndim == 2:
-        res_norms = res_norms.transpose(0, 1).unsqueeze(-2)
-        
+    # SOTA: Factor = sqrt(2.0/pi) / sqrt(block_size). 
+    # This factor matches TurboQuantProd and the Triton kernel exactly.
+    qjl_factor = math.sqrt(2.0 / math.pi) / math.sqrt(block_size)
+    
+    # Broadcast residual norms correctly
+    # quantized_key.residual_norms: (..., n_k)
+    res_norms = quantized_key.residual_norms.unsqueeze(-2) # (..., 1, n_k)
+    
     scores_qjl = qjl_factor * qjl_dot * res_norms
 
     return (scores_mse + scores_qjl) * scale

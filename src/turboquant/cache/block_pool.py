@@ -12,7 +12,7 @@ class KVBlockPool:
         num_blocks: int,
         head_dim: int,
         n_heads: int,
-        tokens_per_block: int = 16, # number of tokens per paged block
+        tokens_per_block: int = 128, # SOTA Standard: Block-128
         device: str = "cuda",
         dtype: torch.dtype = torch.float16,
         k_bits: int = 8,
@@ -56,9 +56,9 @@ class KVBlockPool:
             dtype=torch.uint8, device=self.device
         )
         
-        # Key Metadata: (norm, scale, residual_norm) for Sketched Attention reconstruction
+        # Key Metadata: (norm, scale, residual_norm) per Block ($W$ rotation metadata)
         self.k_metadata = torch.zeros(
-            (num_blocks, n_heads, tokens_per_block, 3), 
+            (num_blocks, n_heads, 3), 
             dtype=torch.float32, device=self.device
         )
         
@@ -68,10 +68,10 @@ class KVBlockPool:
             dtype=torch.uint8, device=self.device
         )
         
-        # SOTA FIX: Per-token metadata for Value (Multi-group support)
+        # SOTA: Block-wide metadata for Value (One set per 128 tokens)
         self.num_v_groups = max(1, head_dim // 128)
         self.v_metadata = torch.zeros(
-            (num_blocks, n_heads, tokens_per_block, self.num_v_groups, 2), # (Scale, Zero)
+            (num_blocks, n_heads, self.num_v_groups, 2), # (Scale, Zero) per Block
             dtype=torch.float32, device=self.device
         )
         

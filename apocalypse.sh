@@ -15,10 +15,9 @@ rsync -a --delete --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_c
 
 echo "--- 2. UV SYNC (Module Registration) ---"
 cd $PROJECT_DIR
-# Regular sync is fast unless pyproject.toml changed
+# SOTA: Force editable installation to ensure local source is used
 uv sync
-# SOTA FIX: Force install triton to ensure CUDA kernels work on WSL2
-uv pip install triton
+uv pip install -e .
 
 # Kill ghost pycache in source
 find src -name "__pycache__" -exec rm -rf {} +

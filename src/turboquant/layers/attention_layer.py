@@ -54,6 +54,26 @@ class TurboQuantAttention(nn.Module):
         # SOTA: RoPE Support (Injected by Patcher)
         self.rotary_emb = None
         
+    def _fwht(self, x: torch.Tensor):
+        """Fast Walsh-Hadamard Transform (Iterative)"""
+        b, h, s, d = x.shape
+        # Ensure d is a power of 2 for FWHT (pad if necessary)
+        if (d & (d - 1)) != 0:
+            target_d = 2**(d-1).bit_length()
+            x = torch.nn.functional.pad(x, (0, target_d - d))
+            d = target_d
+        
+        res = x.clone()
+        h_step = 1
+        while h_step < d:
+            for i in range(0, d, h_step * 2):
+                low = res[..., i:i+h_step]
+                high = res[..., i+h_step:i+h_step*2]
+                res[..., i:i+h_step] = low + high
+                res[..., i+h_step:i+h_step*2] = low - high
+            h_step *= 2
+        return res / (d ** 0.5)
+
     def forward(
         self,
         query: torch.Tensor,
@@ -92,6 +112,11 @@ class TurboQuantAttention(nn.Module):
 
             q = (q * cos) + (_rotate_half(q) * sin)
             k = (k * cos) + (_rotate_half(k) * sin)
+
+        # 4. SOTA: Cascaded WHT for Outlier Suppression (Only if Quantized path)
+        if not self.is_protected:
+            q = self._fwht(q)
+            k = self._fwht(k)
 
         if kv_cache is not None:
             # Update quantizers in cache manager

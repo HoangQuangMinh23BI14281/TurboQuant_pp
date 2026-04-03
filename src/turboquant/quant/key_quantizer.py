@@ -40,13 +40,22 @@ class TurboQuantMSE(nn.Module):
         
         return self.rotation(query)
 
-    def quantize(self, x: torch.Tensor, pack: bool = False) -> MSEQuantized:
+    def quantize(self, x: torch.Tensor, pack: bool = False, precomputed_norms: torch.Tensor = None, precomputed_scales: torch.Tensor = None) -> MSEQuantized:
+        """
+        Quantize vector(s) into MSE stage indices.
+        SOTA: supports sticky metadata (precomputed_norms/scales) for block-aligned parity.
+        """
         shape = x.shape[:-1]
         device = x.device
         dtype = x.dtype
-
-        vec_norms = torch.norm(x, p=2, dim=-1)
-        x_unit = x / (vec_norms.unsqueeze(-1) + 1e-10)
+        
+        # 1. Step: Norm isolation (L2)
+        if precomputed_norms is not None:
+            vec_norms = precomputed_norms
+        else:
+            vec_norms = torch.norm(x, p=2, dim=-1)
+            
+        x_unit = (x / (vec_norms.unsqueeze(-1) + 1e-10)).contiguous()
 
         if self.padded:
             padding = torch.zeros((*shape, self.block_size - self.dim), device=device, dtype=dtype)
@@ -54,20 +63,31 @@ class TurboQuantMSE(nn.Module):
         else:
             x_padded = x_unit
 
+        # 2. Step: Cascaded WHT Rotation
         x_rotated = self.rotation(x_padded)
-        rms_scales = torch.norm(x_rotated, dim=-1, keepdim=True) / math.sqrt(self.block_size)
-        x_normalized = x_rotated / (rms_scales + 1e-10)
-
-        indices = lloyd_max_quantize(x_normalized, self.bits, dist='gaussian')
-        reconstructed_unit = lloyd_max_dequantize(indices, self.bits, dist='gaussian')
         
-        numerator = (x_rotated * reconstructed_unit).sum(dim=-1, keepdim=True)
-        denominator = (reconstructed_unit * reconstructed_unit).sum(dim=-1, keepdim=True) + 1e-10
-        refined_gamma = numerator / denominator
-
+        # 3. Step: Linear Scaling (Sticky-aware)
+        if precomputed_scales is not None:
+            refined_gamma = precomputed_scales
+            x_normalized = x_rotated / (refined_gamma + 1e-10)
+        else:
+            rms_scales = torch.norm(x_rotated, dim=-1, keepdim=True) / math.sqrt(self.block_size)
+            x_normalized = x_rotated / (rms_scales + 1e-10)
+            
+            # Lloyd-Max refinement (Lloyd-Max + RMS)
+            indices_tmp = lloyd_max_quantize(x_normalized, self.bits, dist='gaussian')
+            reconstructed_unit = lloyd_max_dequantize(indices_tmp, self.bits, dist='gaussian')
+            
+            numerator = (x_rotated * reconstructed_unit).sum(dim=-1, keepdim=True)
+            denominator = (reconstructed_unit * reconstructed_unit).sum(dim=-1, keepdim=True) + 1e-10
+            refined_gamma = numerator / denominator
+            x_normalized = x_rotated / (refined_gamma + 1e-10)
+            
+        indices = lloyd_max_quantize(x_normalized, self.bits, dist='gaussian')
+        
         if pack:
             indices = pack_indices(indices, self.bits)
-
+            
         return MSEQuantized(indices=indices, norms=vec_norms, scales=refined_gamma, bits=self.bits, packed=pack)
 
     def dequantize(self, q: MSEQuantized) -> torch.Tensor:
@@ -92,38 +112,29 @@ class TurboQuantMSE(nn.Module):
         """Quantize then dequantize (for testing roundtrip quality)."""
         return self.dequantize(self.quantize(x))
 
-    def quantize_and_residual(self, x: torch.Tensor, pack: bool = True) -> Tuple[MSEQuantized, torch.Tensor]:
-        shape = x.shape[:-1]
-        device = x.device
-        dtype = x.dtype
-
-        vec_norms = torch.norm(x, p=2, dim=-1)
-        x_unit = x / (vec_norms.unsqueeze(-1) + 1e-10)
-
-        if self.padded:
-            padding = torch.zeros((*shape, self.block_size - self.dim), device=device, dtype=dtype)
-            x_padded = torch.cat([x_unit, padding], dim=-1)
-        else:
-            x_padded = x_unit
-
-        x_rotated = self.rotation(x_padded)
-        rms_scales = torch.norm(x_rotated, dim=-1, keepdim=True) / math.sqrt(self.block_size)
-        x_normalized = x_rotated / (rms_scales + 1e-10)
+    def quantize_and_residual(self, x: torch.Tensor, pack: bool = True, precomputed_norms: torch.Tensor = None, precomputed_scales: torch.Tensor = None) -> Tuple[MSEQuantized, torch.Tensor]:
+        """
+        Quantize and return residual in the rotated domain.
+        SOTA: must use the same sticky metadata for the residual calculation.
+        """
+        mse_q = self.quantize(x, pack=pack, precomputed_norms=precomputed_norms, precomputed_scales=precomputed_scales)
         
-        indices = lloyd_max_quantize(x_normalized, self.bits, dist='gaussian')
+        # 1. Reconstruct Unit Vector in Rotated Domain
+        indices = unpack_indices(mse_q.indices, self.bits, self.block_size) if pack else mse_q.indices
         reconstructed_unit = lloyd_max_dequantize(indices, self.bits, dist='gaussian')
         
-        numerator = (x_rotated * reconstructed_unit).sum(dim=-1, keepdim=True)
-        denominator = (reconstructed_unit * reconstructed_unit).sum(dim=-1, keepdim=True) + 1e-10
-        refined_gamma = numerator / denominator
+        # 2. Apply Sticky Scale
+        reconstructed_rotated = reconstructed_unit * mse_q.scales
         
-        reconstructed_rotated = reconstructed_unit * refined_gamma
+        # 3. Get Input in Rotated Domain (using Sticky Norm)
+        x_unit = (x / (mse_q.norms.unsqueeze(-1) + 1e-10)).contiguous()
+        if self.padded:
+            x_padded = torch.cat([x_unit, torch.zeros((*x.shape[:-1], self.block_size - self.dim), device=x.device, dtype=x.dtype)], dim=-1)
+        else:
+            x_padded = x_unit
+        x_rotated = self.rotation(x_padded.contiguous())
+        
         residual_rotated = x_rotated - reconstructed_rotated
-
-        if pack:
-            indices = pack_indices(indices, self.bits)
-
-        mse_q = MSEQuantized(indices=indices, norms=vec_norms, scales=refined_gamma, bits=self.bits, packed=pack)
         return mse_q, residual_rotated
 
 
@@ -142,20 +153,25 @@ class TurboQuantProd(nn.Module):
 
         qjl_signs = generate_sign_array(self.block_size, use_llama_preset='qjl')
         self.register_buffer('qjl_signs', qjl_signs)
-        self.qjl_scale = math.sqrt(math.pi / 2.0) / math.sqrt(self.block_size)
+        # SOTA: Theoretical optimum for QJL inner-product correction
+        self.qjl_scale = math.sqrt(2.0 / math.pi) / math.sqrt(self.block_size)
 
     def transform_query(self, query: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         q_rot = self.mse_quantizer.transform_query(query)
         q_sketch = fwht(apply_sign_array(q_rot, self.qjl_signs))
         return q_rot, q_sketch
 
-    def quantize(self, x: torch.Tensor, pack: bool = True) -> ProdQuantized:
-        mse_q, residual_rotated = self.mse_quantizer.quantize_and_residual(x, pack=False)
+    def quantize(self, x: torch.Tensor, pack: bool = True, precomputed_norms=None, precomputed_scales=None, precomputed_res_norms=None) -> ProdQuantized:
+        mse_q, residual_rotated = self.mse_quantizer.quantize_and_residual(x, pack=False, precomputed_norms=precomputed_norms, precomputed_scales=precomputed_scales)
         residual_signed = apply_sign_array(residual_rotated, self.qjl_signs)
         residual_projected = fwht(residual_signed)
 
         qjl_sign_bits = (residual_projected >= 0).to(torch.uint8)
-        residual_norms = torch.norm(residual_rotated, dim=-1) * mse_q.norms
+        
+        if precomputed_res_norms is not None:
+            residual_norms = precomputed_res_norms
+        else:
+            residual_norms = torch.norm(residual_rotated, dim=-1) * mse_q.norms
 
         mse_indices = mse_q.indices
         if pack:

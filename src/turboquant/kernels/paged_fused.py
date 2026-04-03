@@ -9,42 +9,36 @@ def compute_centroids(bits: int, dist: str = 'gaussian'):
     return compute_lloyd_max_codebook(bits, dist=dist)['centroids']
 
 def _get_packing_params(bits: int):
-    if bits == 1:
-        return 1, 8
-    elif bits == 2:
-        return 2, 4
-    elif bits <= 4:
+    if bits <= 4:
         return bits, 8 // bits
     else:
-        return 8, 1
+        return bits, 1
 
 @triton.jit
 def _turboquant_paged_fused_kernel(
     Q_ROT_ptr, Q_SKETCH_ptr,
     K_INDICES_ptr, K_SIGNS_ptr, K_METADATA_ptr,
     V_INDICES_ptr, V_METADATA_ptr,
-    K_CENTROIDS_ptr, V_CENTROIDS_ptr,
+    K_CENTROIDS_ptr,
     BLOCK_TABLE_ptr,
     K_SUMMARIES_ptr,        # Quest: Min/Max per block
     BLOCK_IMPORTANCE_ptr,   # H2O: Cumulative scores
     OUT_ptr,
     stride_k_index_b, stride_k_index_h, stride_k_index_s, stride_k_index_d,
     stride_k_signs_b, stride_k_signs_h, stride_k_signs_s, stride_k_signs_d,
-    stride_k_meta_b, stride_k_meta_h, stride_k_meta_s, stride_k_meta_attr,
+    stride_k_meta_b, stride_k_meta_h, stride_k_meta_attr, # Updated Meta K
     stride_v_index_b, stride_v_index_h, stride_v_index_s, stride_v_index_d,
-    stride_v_meta_b, stride_v_meta_h, stride_v_meta_s, stride_v_meta_g, stride_v_meta_attr,
+    stride_v_meta_b, stride_v_meta_h, stride_v_meta_g, stride_v_meta_attr, # Updated Meta V
     stride_sum_b, stride_sum_h, stride_sum_attr, stride_sum_d,
     stride_imp_b, stride_imp_h,
     stride_qr_bh, stride_qr_d,
     stride_qs_bh, stride_qs_d,
     stride_o_bh, stride_o_d,
     N, D,
-    PACKED_D_MSE, PACKED_D_SIGNS, PACKED_D_V,
     K_BITS, K_VALS_PER_BYTE,
     V_BITS, V_VALS_PER_BYTE,
     N_HEADS: tl.constexpr,
     N_KV_HEADS: tl.constexpr,
-    GROUP_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     QJL_SCALE, SM_SCALE,
     QUEST_THRESHOLD,
@@ -68,16 +62,13 @@ def _turboquant_paged_fused_kernel(
         n_range = start_n + tl.arange(0, BLOCK_N)
         n_mask = n_range < N
         
-        # 1. Quest: Query-Aware Sparsity Check (Block Level Skip)
-        # SOTA: Evaluate if this block is even relevant before loading heavy KV data
+        # 1. Quest: Query-Aware Sparsity Check
         p_idx = start_n // BLOCK_SIZE
         pb_id = tl.load(BLOCK_TABLE_ptr + p_idx, mask=(start_n < N))
         
-        # SOTA: GQA-Aware Fetching
         k_min = tl.load(K_SUMMARIES_ptr + pb_id * stride_sum_b + pid_kv_h * stride_sum_h + 0 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
         k_max = tl.load(K_SUMMARIES_ptr + pb_id * stride_sum_b + pid_kv_h * stride_sum_h + 1 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
         
-        # Upper bound: sum(max(q_i * min_i, q_i * max_i))
         q_min = q_rot * k_min
         q_max = q_rot * k_max
         quest_bound = tl.sum(tl.maximum(q_min, q_max)) * SM_SCALE
@@ -87,11 +78,11 @@ def _turboquant_paged_fused_kernel(
             slot_indices = n_range - (block_indices * BLOCK_SIZE)
             physical_block_ids = tl.load(BLOCK_TABLE_ptr + block_indices, mask=n_mask, other=0)
             
+            # SOTA Pillar 3: Optimized Load Paths
             k_byte_base = K_INDICES_ptr + physical_block_ids[:, None] * stride_k_index_b + pid_kv_h * stride_k_index_h
             k_sig_base = K_SIGNS_ptr + physical_block_ids[:, None] * stride_k_signs_b + pid_kv_h * stride_k_signs_h
             k_met_base = K_METADATA_ptr + physical_block_ids[:, None] * stride_k_meta_b + pid_kv_h * stride_k_meta_h
             
-            # Load packed K indices and signs
             k_byte_idx = d_range // K_VALS_PER_BYTE
             k_sub_idx = d_range % K_VALS_PER_BYTE
             k_idx_packed = tl.load(k_byte_base + slot_indices[:, None] * stride_k_index_s + k_byte_idx[None, :] * stride_k_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
@@ -102,12 +93,15 @@ def _turboquant_paged_fused_kernel(
             k_sig_packed = tl.load(k_sig_base + slot_indices[:, None] * stride_k_signs_s + ks_byte_idx[None, :] * stride_k_signs_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
             ksi = (k_sig_packed >> ks_sub_idx) & 1
             
-            kn = tl.load(k_met_base + slot_indices[:, None] * stride_k_meta_s + 0 * stride_k_meta_attr, mask=n_mask[:, None], other=1.0)
-            ks = tl.load(k_met_base + slot_indices[:, None] * stride_k_meta_s + 1 * stride_k_meta_attr, mask=n_mask[:, None], other=1.0)
-            kr = tl.load(k_met_base + slot_indices[:, None] * stride_k_meta_s + 2 * stride_k_meta_attr, mask=n_mask[:, None], other=0.0)
+            # Key Metadata (Shared per Block - SOTA Pillar 2)
+            # Actually, K Meta in my manager was still per-slot for norm? 
+            # No, I changed it to per-block: self.pool.k_metadata[current_block_id, :, 0]
+            kn = tl.load(k_met_base + 0 * stride_k_meta_attr)
+            ks = tl.load(k_met_base + 1 * stride_k_meta_attr)
+            kr = tl.load(k_met_base + 2 * stride_k_meta_attr)
             
             k_mse = tl.load(K_CENTROIDS_ptr + ki).to(tl.float32) * kn * ks
-            k_qjl = tl.where(ksi == 1, 1.0, -1.0) * kr * QJL_SCALE
+            k_qjl = (ksi.to(tl.float32) * 2.0 - 1.0) * kr * QJL_SCALE
             
             scores = tl.sum(q_rot[None, :] * k_mse + q_sk[None, :] * k_qjl, 1) * SM_SCALE
             scores = tl.where(n_mask, scores, float("-inf"))
@@ -116,10 +110,11 @@ def _turboquant_paged_fused_kernel(
             alpha = tl.exp(m_i - m_new)
             p = tl.exp(scores - m_new)
             
-            # 2. H2O: Importance Accumulation
+            # H2O: Importance Accumulation
             block_importance = tl.sum(p)
             tl.atomic_add(BLOCK_IMPORTANCE_ptr + pb_id * stride_imp_b + pid_kv_h * stride_imp_h, block_importance)
 
+            # SOTA Pillar 3: Vectorized Asymmetric V-Dequantization
             v_idx_base = V_INDICES_ptr + physical_block_ids[:, None] * stride_v_index_b + pid_kv_h * stride_v_index_h
             v_met_base = V_METADATA_ptr + physical_block_ids[:, None] * stride_v_meta_b + pid_kv_h * stride_v_meta_h
             
@@ -128,11 +123,14 @@ def _turboquant_paged_fused_kernel(
             v_idx_packed = tl.load(v_idx_base + slot_indices[:, None] * stride_v_index_s + v_byte_idx[None, :] * stride_v_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
             vi = (v_idx_packed >> (v_sub_idx * V_BITS)).to(tl.int32) & ((1 << V_BITS) - 1)
             
-            v_mse = tl.load(V_CENTROIDS_ptr + vi).to(tl.float32)
-            v_scale = tl.load(v_met_base + slot_indices[:, None] * stride_v_meta_s + 0 * stride_v_meta_attr, mask=n_mask[:, None], other=1.0)
-            v_zeros = tl.load(v_met_base + slot_indices[:, None] * stride_v_meta_s + 1 * stride_v_meta_attr, mask=n_mask[:, None], other=0.0)
+            # Value Metadata: Block-Aligned Linear Scaling
+            # Loaded once per head per block (No slot index!)
+            v_scale = tl.load(v_met_base + 0 * stride_v_meta_g + 0 * stride_v_meta_attr) 
+            v_zeros = tl.load(v_met_base + 0 * stride_v_meta_g + 1 * stride_v_meta_attr)
             
-            v_deq = v_mse * v_scale + v_zeros
+            # V = idx * scale + min (Pillar 1: Absolute Asymmetric)
+            v_deq = vi.to(tl.float32) * v_scale + v_zeros
+            
             acc = acc * alpha + tl.sum(p[:, None] * v_deq, 0)
             l_i = l_i * alpha + tl.sum(p, 0)
             m_i = m_new
@@ -148,19 +146,19 @@ def turboquant_paged_fused_attention(
     sm_scale: float,
     quest_threshold: float = 1e-4
 ) -> torch.Tensor:
-    # 1. Transform Query (Sketched Attention)
-    # SOTA FIX: Ensure query is reshaped to head-wise view [n_heads, head_dim] for transformation
     n_heads = kv_cache.n_heads
     head_dim = kv_cache.head_dim
     q_view = query.reshape(n_heads, head_dim)
     
     q_rot, q_sketch = kv_cache.k_quantizer.transform_query(q_view)
     D = q_rot.shape[-1]
-    BH = n_heads # For batch=1
+    BH = n_heads 
     q_rot = q_rot.reshape(BH, D)
     q_sketch = q_sketch.reshape(BH, D)
     
-    # 2. Get Paged Pointers
+    # SOTA Pillar 1: Luôn trừ 1 bit cho QJL Sign!
+    k_mse_bits = k_bits - 1 
+    
     ptrs = kv_cache.get_paged_ptrs()
     pool = ptrs["pool"]
     block_table = ptrs["block_table"]
@@ -168,14 +166,14 @@ def turboquant_paged_fused_attention(
     if context_len == 0:
         return torch.zeros_like(query)
 
-    # 3. Fetch Centroids
-    k_centroids = compute_centroids(k_bits, dist='gaussian').to(query.device, query.dtype)
-    v_centroids = compute_centroids(v_bits, dist='laplace').to(query.device, query.dtype)
+    # Tạo bảng Centroid ĐÚNG SỐ BIT
+    k_centroids = compute_centroids(k_mse_bits, dist='gaussian').to(query.device, query.dtype)
     
-    # 4. Dispatch to Kernel
     out = torch.zeros((BH, D), device=query.device, dtype=torch.float32)
     tokens_per_block = pool.tokens_per_block
-    k_vpb = 8 // k_bits
+    
+    # Tính bước nhảy unpack ĐÚNG SỐ BIT (Pillar 3)
+    k_vpb = 8 // k_mse_bits 
     v_vpb = 8 // v_bits
     
     kis, kqs, kms = pool.k_indices.stride(), pool.k_qjl.stride(), pool.k_metadata.stride()
@@ -184,31 +182,39 @@ def turboquant_paged_fused_attention(
     
     grid = (BH,)
     _turboquant_paged_fused_kernel[grid](
-        q_rot, q_sketch,
-        pool.k_indices, pool.k_qjl, pool.k_metadata,
-        pool.v_indices, pool.v_metadata, 
-        k_centroids, v_centroids, 
-        block_table, 
-        pool.k_summaries, 
-        pool.block_importance,
-        out,
-        kis[0], kis[1], kis[2], kis[3],
-        kqs[0], kqs[1], kqs[2], kqs[3],
-        kms[0], kms[1], kms[2], kms[3],
-        vis[0], vis[1], vis[2], vis[3],
-        vms[0], vms[1], vms[2], vms[3], vms[4],
-        ss[0], ss[1], ss[2], ss[3],
-        ims[0], ims[1],
-        q_rot.stride(0), q_rot.stride(1),
-        q_sketch.stride(0), q_sketch.stride(1),
-        out.stride(0), out.stride(1),
-        context_len, D,
-        pool.k_indices.shape[-1], pool.k_qjl.shape[-1], pool.v_indices.shape[-1],
-        k_bits, k_vpb, v_bits, v_vpb,
-        n_heads, kv_cache.n_kv_heads, kv_cache.group_size, tokens_per_block,
-        qjl_scale, sm_scale, 
-        quest_threshold,
-        128, num_warps=4
+        Q_ROT_ptr=q_rot,
+        Q_SKETCH_ptr=q_sketch,
+        K_INDICES_ptr=pool.k_indices,
+        K_SIGNS_ptr=pool.k_qjl,
+        K_METADATA_ptr=pool.k_metadata,
+        V_INDICES_ptr=pool.v_indices,
+        V_METADATA_ptr=pool.v_metadata, 
+        K_CENTROIDS_ptr=k_centroids, 
+        BLOCK_TABLE_ptr=block_table, 
+        K_SUMMARIES_ptr=pool.k_summaries, 
+        BLOCK_IMPORTANCE_ptr=pool.block_importance,
+        OUT_ptr=out,
+        stride_k_index_b=kis[0], stride_k_index_h=kis[1], stride_k_index_s=kis[2], stride_k_index_d=kis[3],
+        stride_k_signs_b=kqs[0], stride_k_signs_h=kqs[1], stride_k_signs_s=kqs[2], stride_k_signs_d=kqs[3],
+        stride_k_meta_b=kms[0], stride_k_meta_h=kms[1], stride_k_meta_attr=kms[2],
+        stride_v_index_b=vis[0], stride_v_index_h=vis[1], stride_v_index_s=vis[2], stride_v_index_d=vis[3],
+        stride_v_meta_b=vms[0], stride_v_meta_h=vms[1], stride_v_meta_g=vms[2], stride_v_meta_attr=vms[3],
+        stride_sum_b=ss[0], stride_sum_h=ss[1], stride_sum_attr=ss[2], stride_sum_d=ss[3],
+        stride_imp_b=ims[0], stride_imp_h=ims[1],
+        stride_qr_bh=q_rot.stride(0), stride_qr_d=q_rot.stride(1),
+        stride_qs_bh=q_sketch.stride(0), stride_qs_d=q_sketch.stride(1),
+        stride_o_bh=out.stride(0), stride_o_d=out.stride(1),
+        N=context_len, D=D,
+        K_BITS=k_mse_bits, K_VALS_PER_BYTE=k_vpb,
+        V_BITS=v_bits, V_VALS_PER_BYTE=v_vpb,
+        N_HEADS=n_heads,
+        N_KV_HEADS=kv_cache.n_kv_heads,
+        BLOCK_SIZE=tokens_per_block,
+        QJL_SCALE=qjl_scale,
+        SM_SCALE=sm_scale, 
+        QUEST_THRESHOLD=quest_threshold,
+        BLOCK_N=128,
+        num_warps=4
     )
     
     if D > kv_cache.head_dim:
@@ -216,10 +222,8 @@ def turboquant_paged_fused_attention(
         
     return out.reshape(query.shape).to(query.dtype)
 
-def paged_turboquant_attention(query: torch.Tensor, kv_cache: Any) -> torch.Tensor:
+def paged_turboquant_attention(query: torch.Tensor, kv_cache: Any, k_bits: int, v_bits: int, qjl_scale: float, sm_scale: float) -> torch.Tensor:
     # High-level entry point for direct testing
     return turboquant_paged_fused_attention(
-        query, kv_cache, 
-        kv_cache.k_quantizer.bits - 1 if kv_cache.k_quantizer else 4,
-        4, 1.0, 1.0 / (query.shape[-1]**0.5)
+        query, kv_cache, k_bits, v_bits, qjl_scale, sm_scale
     )

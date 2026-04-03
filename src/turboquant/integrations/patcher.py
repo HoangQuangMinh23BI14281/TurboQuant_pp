@@ -38,6 +38,13 @@ def patch_hf_model(model: nn.Module, tq_config: Optional[TurboQuantConfig] = Non
     current_idx = 0
     for name, module in model.named_modules():
         if any(cls in str(type(module)) for cls in target_classes):
+            # SOTA Pillar 4: Boundary Layer Protection
+            # Skip first and last 2 layers (High importance for vocabulary/decisions)
+            if current_idx < 2 or current_idx >= total_layers - 2:
+                logger.info(f"Skipping Boundary Layer {current_idx} ({name}) - Running in Native FP16")
+                current_idx += 1
+                continue
+            
             # Create our SOTA layer
             dim = getattr(module, "hidden_size", model.config.hidden_size)
             num_heads = getattr(module, "num_heads", model.config.num_attention_heads)

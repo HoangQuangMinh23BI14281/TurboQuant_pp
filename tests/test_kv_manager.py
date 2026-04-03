@@ -78,16 +78,16 @@ def test_kv_manager_metadata_fidelity():
     assert pool.k_indices.shape[-1] == expected_dim
     
     # Check K metadata (norm, scale, residual_norm)
-    # k_metadata shape: (blocks, heads, tokens_per_block, 3)
+    # k_metadata shape: (blocks, heads, 3) - SOTA Pillar 2: Block-wide
     assert pool.k_metadata.shape[-1] == 3
     # Ensure norms are not zero after append
-    assert torch.any(pool.k_metadata[bid, 0, 0, 0] != 0) 
+    assert torch.any(pool.k_metadata[bid, 0, 0] != 0) 
     
-    # Check V metadata (Scale and Zero per token per group)
+    # Check V metadata (Scale and Zero per block per group)
     expected_groups = max(1, head_dim // 128)
-    # v_metadata shape: (blocks, heads, tokens_per_block, groups, 2)
+    # v_metadata shape: (blocks, heads, groups, 2)
     assert pool.v_metadata.shape[-2] == expected_groups
-    assert torch.any(pool.v_metadata[bid, 0, 0, 0, 0] != 0)
+    assert torch.any(pool.v_metadata[bid, 0, 0, 0] != 0)
 
 def test_kv_manager_boundary_protection():
     """

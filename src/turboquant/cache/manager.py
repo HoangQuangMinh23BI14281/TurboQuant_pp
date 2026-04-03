@@ -66,10 +66,12 @@ class TurboQuantKVCache(Cache):
             self.v_quantizer = None
         
         # Paged Attention State
-        self.block_table: List[int] = [] # sequence of physical block IDs
+        self.block_table = []
         self.block_ids = self.block_table # Alias for test compatibility
         self.num_tokens = 0
         self.layers = [] # Transformers Cache shim
+        self.layer_class_to_replicate = None # SOTA Transformers compat
+        self.offloading = False # SOTA Transformers compat
         
     # --- Transformers Cache Interface Sim ---
     def get_seq_length(self, layer_idx: Optional[int] = None) -> int:
@@ -101,17 +103,23 @@ class TurboQuantKVCache(Cache):
         k = k.to(self.device)
         v = v.to(self.device)
         
-        # Check if we need a new block
-        if self.num_tokens % self.tokens_per_block == 0:
-            new_block_id = self.pool.allocate_block()
-            self.block_table.append(new_block_id)
-            
-        current_block_id = self.block_table[-1]
-        slot_offset = self.num_tokens % self.tokens_per_block
+        # SOTA: Prefill Path (Handle chunking BEFORE allocation)
+        if seq_len > 1:
+            for i in range(0, seq_len):
+                self.append(k[:, :, i:i+1, :], v[:, :, i:i+1, :])
+            return
+
+        # Ensure inputs are on the same device as the pool
+        k_in = k.to(self.device).reshape(self.n_heads, self.head_dim)
+        v_in = v.to(self.device).reshape(self.n_heads, self.head_dim)
         
-        # Prepare Input View (Standardized across paths)
-        k_in = k.reshape(self.n_heads, self.head_dim)
-        v_in = v.reshape(self.n_heads, self.head_dim)
+        # Check if we need a new block
+        slot_offset = self.num_tokens % self.tokens_per_block
+        if slot_offset == 0:
+            current_block_id = self.pool.allocate_block()
+            self.block_table.append(current_block_id)
+        else:
+            current_block_id = self.block_table[-1]
         
         # 1. Quest Summary Update (SOTA Sparsity - Universal)
         # Update dimension-wise Min/Max for the current block (applied to both FP16/Quant paths)
@@ -126,32 +134,70 @@ class TurboQuantKVCache(Cache):
             # Native FP16 Path: No compression, straight to pool
             self.pool.k_fp16[current_block_id, :, slot_offset] = k_in
             self.pool.v_fp16[current_block_id, :, slot_offset] = v_in
+            
+            # Update Quest summaries for FP16 too
+            if slot_offset == 0:
+                self.pool.k_summaries[current_block_id, :, 0, :] = k_in
+                self.pool.k_summaries[current_block_id, :, 1, :] = k_in
+            else:
+                self.pool.k_summaries[current_block_id, :, 0, :] = torch.min(self.pool.k_summaries[current_block_id, :, 0, :], k_in)
+                self.pool.k_summaries[current_block_id, :, 1, :] = torch.max(self.pool.k_summaries[current_block_id, :, 1, :], k_in)
         else:
-            # Quantized Path (TURBO_4BIT)
-            # 1. Quantize with Mandatory Bit-Packing
-            k_res = self.k_quantizer.quantize(k_in, pack=True)
-            k_q = k_res if (hasattr(k_res, 'indices') or hasattr(k_res, 'mse_indices')) else k_res[0]
-            v_q = self.v_quantizer.quantize(v_in, pack=True)
-            
-            # 2. Store to Pool
-            k_raw_indices = getattr(k_q, "indices", getattr(k_q, "mse_indices", None))
-            self.pool.k_indices[current_block_id, :, slot_offset] = k_raw_indices.to(torch.uint8)
-            
-            qjl_raw = getattr(k_q, "qjl_signs", None)
-            if qjl_raw is not None:
-                self.pool.k_qjl[current_block_id, :, slot_offset] = qjl_raw.to(torch.uint8)
-            
-            # Metadata: Norm, Scale, and Residual Norm (Ensure device match)
-            self.pool.k_metadata[current_block_id, :, slot_offset, 0] = k_q.norms.flatten().to(self.device)
-            if hasattr(k_q, 'scales') and k_q.scales is not None:
-                self.pool.k_metadata[current_block_id, :, slot_offset, 1] = k_q.scales.flatten().to(self.device)
-            if hasattr(k_q, 'residual_norms') and k_q.residual_norms is not None:
-                self.pool.k_metadata[current_block_id, :, slot_offset, 2] = k_q.residual_norms.flatten().to(self.device)
-            
-            self.pool.v_indices[current_block_id, :, slot_offset] = v_q.indices.to(torch.uint8)
-            self.pool.v_metadata[current_block_id, :, slot_offset, :, 0] = v_q.scales.reshape(self.n_heads, -1).to(self.device)
-            self.pool.v_metadata[current_block_id, :, slot_offset, :, 1] = v_q.zero_points.reshape(self.n_heads, -1).to(self.device)
+            # 2. Key Cache with SOTA Pillar 2: Sticky Metadata
+            if slot_offset == 0:
+                k_q = self.k_quantizer.quantize(k_in, pack=True)
+                self.pool.k_metadata[current_block_id, :, 0] = k_q.norms.flatten().to(self.device).to(torch.float32)
+                self.pool.k_metadata[current_block_id, :, 1] = k_q.scales.flatten().to(self.device).to(torch.float32)
+                self.pool.k_metadata[current_block_id, :, 2] = k_q.residual_norms.flatten().to(self.device).to(torch.float32)
                 
+                # SOTA: Initialize Quest summaries from first reconstruction
+                k_recon = self.k_quantizer.dequantize(k_q).reshape(self.n_heads, -1)
+                self.pool.k_summaries[current_block_id, :, 0, :] = k_recon.to(self.device)
+                self.pool.k_summaries[current_block_id, :, 1, :] = k_recon.to(self.device)
+            else:
+                pre_norms = self.pool.k_metadata[current_block_id, :, 0].reshape(self.n_heads).to(self.device)
+                pre_scales = self.pool.k_metadata[current_block_id, :, 1].reshape(self.n_heads, 1).to(self.device)
+                pre_res_norms = self.pool.k_metadata[current_block_id, :, 2].reshape(self.n_heads).to(self.device)
+                
+                k_q = self.k_quantizer.quantize(
+                    k_in, pack=True, 
+                    precomputed_norms=pre_norms, 
+                    precomputed_scales=pre_scales,
+                    precomputed_res_norms=pre_res_norms
+                )
+                
+                # SOTA: Update Quest summaries conservatively
+                k_recon = self.k_quantizer.dequantize(k_q).reshape(self.n_heads, -1).to(self.device)
+                self.pool.k_summaries[current_block_id, :, 0, :] = torch.minimum(self.pool.k_summaries[current_block_id, :, 0, :], k_recon)
+                self.pool.k_summaries[current_block_id, :, 1, :] = torch.maximum(self.pool.k_summaries[current_block_id, :, 1, :], k_recon)
+
+            # 3. Value Cache with SOTA Pillar 2: Block-wide scaling
+            if slot_offset == 0:
+                v_q = self.v_quantizer.quantize(v_in, pack=True)
+                self.pool.v_metadata[current_block_id, :, :, 0] = v_q.scales.reshape(self.n_heads, -1).to(self.device).to(torch.float32)
+                self.pool.v_metadata[current_block_id, :, :, 1] = v_q.zero_points.reshape(self.n_heads, -1).to(self.device).to(torch.float32)
+                v_indices = v_q.indices
+            else:
+                # Fetch block-aligned metadata
+                b_scale = self.pool.v_metadata[current_block_id, :, :, 0].reshape(self.n_heads, -1)
+                b_zero = self.pool.v_metadata[current_block_id, :, :, 1].reshape(self.n_heads, -1)
+                
+                # Quantize relative to STICKY block metadata
+                v_grouped = v_in.reshape(self.n_heads, -1, self.v_quantizer.group_size)
+                v_scale = b_scale.reshape(self.n_heads, -1, 1)
+                v_zero = b_zero.reshape(self.n_heads, -1, 1)
+                
+                vi = torch.round((v_grouped - v_zero) / (v_scale + 1e-10)).clamp(0, self.v_quantizer.n_levels - 1).to(torch.uint8)
+                v_indices = vi.reshape(self.n_heads, -1)
+                from turboquant.quant.quant_base import pack_indices
+                if self.v_quantizer.bits <= 4:
+                    v_indices = pack_indices(v_indices, self.v_quantizer.bits)
+
+            # 4. Final Store to Pool
+            self.pool.k_indices[current_block_id, :, slot_offset] = k_q.mse_indices
+            self.pool.k_qjl[current_block_id, :, slot_offset] = k_q.qjl_signs
+            self.pool.v_indices[current_block_id, :, slot_offset] = v_indices.to(torch.uint8)
+            
         self.num_tokens += seq_len
 
     def get_paged_ptrs(self) -> Dict[str, any]:
@@ -174,10 +220,10 @@ class TurboQuantKVCache(Cache):
         from turboquant.kernels.fused_attention import paged_turboquant_attention
         
         # SOTA: Fetch dynamic bits and scales for the dispatcher
-        # Use mse_bits (bits-1) for Key to match ProdQuantized centroids
-        k_bits = getattr(self.k_quantizer, "mse_bits", getattr(self.k_quantizer, "bits", 8))
-        v_bits = getattr(self.v_quantizer, "bits", 4)
-        qjl_scale = getattr(self.k_quantizer, "qjl_scale", 1.0)
+        # Use total bits; the kernel dispatcher will solve for mse_bits (bits-1)
+        k_bits = self.k_quantizer.bits if self.k_quantizer else 4
+        v_bits = self.v_quantizer.bits if self.v_quantizer else 4
+        qjl_scale = self.k_quantizer.qjl_scale if self.k_quantizer else 1.0
         
         if scale is None:
             scale = 1.0 / (query.shape[-1] ** 0.5)

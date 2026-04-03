@@ -23,20 +23,17 @@ class TurboQuantValue(nn.Module):
         x_grouped = x.view(*shape, self.n_groups, self.group_size)
         
         v_min = x_grouped.min(dim=-1, keepdim=True).values
-        x_centered = x_grouped - v_min
+        v_max = x_grouped.max(dim=-1, keepdim=True).values
         
-        v_scale = torch.norm(x_centered, dim=-1, keepdim=True) / math.sqrt(self.group_size)
-        x_unit = x_centered / (v_scale + 1e-10)
+        # SOTA: Linear Asymmetric Quantization
+        # V = (idx * scale) + min
+        v_scale = (v_max - v_min) / (self.n_levels - 1 + 1e-10)
         
-        indices = lloyd_max_quantize(x_unit, self.bits, dist='laplace')
-        unit_recon = lloyd_max_dequantize(indices, self.bits, dist='laplace')
-        
-        numerator = (x_centered * unit_recon).sum(dim=-1, keepdim=True)
-        denominator = (unit_recon * unit_recon).sum(dim=-1, keepdim=True) + 1e-10
-        refined_gamma = numerator / denominator
+        # indices = round((x - min) / scale)
+        indices = torch.round((x_grouped - v_min) / (v_scale + 1e-10)).clamp(0, self.n_levels - 1)
         
         indices = indices.view(*shape, self.dim).to(torch.uint8)
-        scales = refined_gamma.view(*shape, self.n_groups)
+        scales = v_scale.view(*shape, self.n_groups)
         zero_points = v_min.view(*shape, self.n_groups)
 
         if pack:
@@ -55,8 +52,8 @@ class TurboQuantValue(nn.Module):
         scales_grouped = q.scales.view(*shape, self.n_groups, 1)
         zp_grouped = q.zero_points.view(*shape, self.n_groups, 1)
         
-        unit_recon = lloyd_max_dequantize(indices_grouped.long(), q.bits, dist='laplace')
-        reconstructed = unit_recon * scales_grouped + zp_grouped
+        # SOTA: V = idx * scale + min
+        reconstructed = indices_grouped.float() * scales_grouped + zp_grouped
         
         return reconstructed.view(*shape, self.dim)
 

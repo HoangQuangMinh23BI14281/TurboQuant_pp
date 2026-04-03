@@ -119,8 +119,9 @@ def turboquant_attention(
         if kv_cache.strategy and kv_cache.strategy.name == "FP16":
             pass # allow fallback to contiguous for fp16 if no use_paged property or if requested
         else:
-            k_bits_val = k_bits if k_bits is not None else (kv_cache.k_quantizer.bits - 1 if kv_cache.k_quantizer else 4)
-            output = paged_turboquant_attention(query, kv_cache, k_bits_val, v_bits, qjl_scale, sm_scale)
+            k_bits_val = k_bits if k_bits is not None else (kv_cache.k_quantizer.bits if kv_cache.k_quantizer else 4)
+            v_bits_val = v_bits if v_bits is not None else (kv_cache.v_quantizer.bits if kv_cache.v_quantizer else 4)
+            output = paged_turboquant_attention(query, kv_cache, k_bits_val, v_bits_val, qjl_scale, sm_scale)
             return output, None
 
     # 2. Contiguous Path
