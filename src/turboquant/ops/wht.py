@@ -9,7 +9,7 @@ def generate_hadamard(d: int, normalized: bool = True) -> torch.Tensor:
     if (d & (d - 1)) != 0 or d <= 0:
         raise ValueError("d must be a power of 2")
 
-    H = torch.tensor([[1, 1], [1, -1]], dtype=torch.float32)
+    H = torch.tensor([[1, 1], [1, -1]], dtype=torch.float64)
     
     current_d = 2
     while current_d < d:

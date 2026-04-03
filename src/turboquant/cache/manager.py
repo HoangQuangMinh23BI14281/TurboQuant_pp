@@ -1,5 +1,6 @@
-import torch
 import math
+import torch
+import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 
 from turboquant.cache.block_pool import KVBlockPool
@@ -125,14 +126,25 @@ class TurboQuantKVCache(Cache):
         else:
             current_block_id = self.block_table[-1]
         
-        # 1. Quest Summary Update (SOTA Sparsity - Universal)
-        # Update dimension-wise Min/Max for the current block (applied to both FP16/Quant paths)
-        if slot_offset == 0:
-            self.pool.k_summaries[current_block_id, :, 0, :] = k_in
-            self.pool.k_summaries[current_block_id, :, 1, :] = k_in
+        # 1. Quest Summary Update (SOTA Sparsity - Rotated Domain Sync)
+        # SOTA: Compute Rotated Domain (WHT) before MSE for importance summary
+        if self.strategy != QuantizationStrategy.FP16:
+            k_unit = k_in / (torch.norm(k_in, p=2, dim=-1, keepdim=True) + 1e-10)
+            # SOTA: transform_query handles padding (64 -> 128) and multi-head logic
+            k_rotated = self.k_quantizer.mse_quantizer.transform_query(k_unit.float())
         else:
-            self.pool.k_summaries[current_block_id, :, 0, :] = torch.min(self.pool.k_summaries[current_block_id, :, 0, :], k_in)
-            self.pool.k_summaries[current_block_id, :, 1, :] = torch.max(self.pool.k_summaries[current_block_id, :, 1, :], k_in)
+            # FP16 layers use original domain for summary, but must PAD to padded_head_dim
+            if self.pool.padded_head_dim != self.head_dim:
+                k_rotated = F.pad(k_in.float(), (0, self.pool.padded_head_dim - self.head_dim))
+            else:
+                k_rotated = k_in.float()
+
+        if slot_offset == 0:
+            self.pool.k_summaries[current_block_id, :, 0, :] = k_rotated.float()
+            self.pool.k_summaries[current_block_id, :, 1, :] = k_rotated.float()
+        else:
+            self.pool.k_summaries[current_block_id, :, 0, :] = torch.min(self.pool.k_summaries[current_block_id, :, 0, :], k_rotated.float())
+            self.pool.k_summaries[current_block_id, :, 1, :] = torch.max(self.pool.k_summaries[current_block_id, :, 1, :], k_rotated.float())
             
         if self.strategy == QuantizationStrategy.FP16:
             # Native FP16 Path: Allocated only when Manager identifies FP16 strategy
@@ -155,10 +167,7 @@ class TurboQuantKVCache(Cache):
                 self.pool.k_metadata[current_block_id, :, 1] = k_q.scales.flatten().to(self.device).to(torch.float32)
                 self.pool.k_metadata[current_block_id, :, 2] = k_q.residual_norms.flatten().to(self.device).to(torch.float32)
                 
-                # SOTA: Initialize Quest summaries from first reconstruction
-                k_recon = self.k_quantizer.dequantize(k_q).reshape(self.n_heads, -1)
-                self.pool.k_summaries[current_block_id, :, 0, :] = k_recon.to(self.device)
-                self.pool.k_summaries[current_block_id, :, 1, :] = k_recon.to(self.device)
+                self.pool.k_metadata[current_block_id, :, 2] = k_q.residual_norms.flatten().to(self.device).to(torch.float32)
             else:
                 pre_norms = self.pool.k_metadata[current_block_id, :, 0].reshape(self.n_heads).to(self.device)
                 pre_scales = self.pool.k_metadata[current_block_id, :, 1].reshape(self.n_heads, 1).to(self.device)
@@ -171,12 +180,7 @@ class TurboQuantKVCache(Cache):
                     precomputed_res_norms=pre_res_norms
                 )
                 
-                # SOTA: Update Quest summaries conservatively
-                k_recon = self.k_quantizer.dequantize(k_q).reshape(self.n_heads, -1).to(self.device)
-                self.pool.k_summaries[current_block_id, :, 0, :] = torch.minimum(self.pool.k_summaries[current_block_id, :, 0, :], k_recon)
-                self.pool.k_summaries[current_block_id, :, 1, :] = torch.maximum(self.pool.k_summaries[current_block_id, :, 1, :], k_recon)
-
-            # 3. Value Cache with SOTA Pillar 2: Block-wide scaling
+                # 3. Value Cache with SOTA Pillar 2: Block-wide scaling
             if slot_offset == 0:
                 v_q = self.v_quantizer.quantize(v_in, pack=True)
                 self.pool.v_metadata[current_block_id, :, :, 0] = v_q.scales.reshape(self.n_heads, -1).to(self.device).to(torch.float32)

@@ -76,9 +76,10 @@ class KVBlockPool:
         )
         
         # 3. Quest & H2O Accelerators
-        # k_summaries: (num_blocks, n_heads, 2, head_dim) -> [min, max] for block-level Quest skipping
+        # k_summaries: (num_blocks, n_heads, 2, padded_head_dim) -> [min, max] for block-level Quest skipping
+        # SOTA: summaries must match the Rotated Domain (padded to 128)
         self.k_summaries = torch.zeros(
-            (num_blocks, n_heads, 2, head_dim),
+            (num_blocks, n_heads, 2, self.padded_head_dim),
             dtype=torch.float32, device=self.device
         )
         # block_importance: (num_blocks, n_heads) -> Cumulative Softmax score for H2O eviction

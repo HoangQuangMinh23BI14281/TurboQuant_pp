@@ -141,6 +141,7 @@ class TurboQuantMSE(nn.Module):
 class TurboQuantProd(nn.Module):
     """
     TurboQuant inner-product-optimal quantizer (Algorithm 2) for K.
+    Version 1.1.0: "Direct Sign" Optimization (Unprojected Residual)
     """
     def __init__(self, dim: int, bits: int = 8, n_rotation_passes: int = 2):
         super().__init__()
@@ -151,22 +152,20 @@ class TurboQuantProd(nn.Module):
         self.mse_quantizer = TurboQuantMSE(dim, self.mse_bits, n_rotation_passes)
         self.block_size = self.mse_quantizer.block_size
 
-        qjl_signs = generate_sign_array(self.block_size, use_llama_preset='qjl')
-        self.register_buffer('qjl_signs', qjl_signs)
-        # SOTA: Theoretical optimum for QJL inner-product correction
+        # SOTA V1.1.0: Direct Sign (No qjl_signs buffer needed)
+        # Scale for Normal distribution: sqrt(2/pi) / sqrt(D)
         self.qjl_scale = math.sqrt(2.0 / math.pi) / math.sqrt(self.block_size)
 
     def transform_query(self, query: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         q_rot = self.mse_quantizer.transform_query(query)
-        q_sketch = fwht(apply_sign_array(q_rot, self.qjl_signs))
-        return q_rot, q_sketch
+        # Direct Sign: Query stays in rotated domain for both MSE and QJL branches
+        return q_rot, q_rot
 
     def quantize(self, x: torch.Tensor, pack: bool = True, precomputed_norms=None, precomputed_scales=None, precomputed_res_norms=None) -> ProdQuantized:
         mse_q, residual_rotated = self.mse_quantizer.quantize_and_residual(x, pack=False, precomputed_norms=precomputed_norms, precomputed_scales=precomputed_scales)
-        residual_signed = apply_sign_array(residual_rotated, self.qjl_signs)
-        residual_projected = fwht(residual_signed)
-
-        qjl_sign_bits = (residual_projected >= 0).to(torch.uint8)
+        
+        # SOTA V1.1.0: Direct Sign (No fwht/apply_sign relative to legacy)
+        qjl_sign_bits = (residual_rotated >= 0).to(torch.uint8)
         
         if precomputed_res_norms is not None:
             residual_norms = precomputed_res_norms
@@ -199,9 +198,9 @@ class TurboQuantProd(nn.Module):
         reconstructed_normalized = lloyd_max_dequantize(mse_indices, q.mse_bits)
         reconstructed_mse_rot = reconstructed_normalized * q.scales
 
+        # SOTA V1.1.0: Direct Sign Restoration (Direction is just the bit-sign)
         signs_float = qjl_signs.float() * 2.0 - 1.0
-        residual_direction = ifwht(signs_float)
-        residual_direction = apply_sign_array(residual_direction, self.qjl_signs)
+        residual_direction = signs_float 
 
         dir_norm = torch.norm(residual_direction, dim=-1, keepdim=True) + 1e-10
         unit_res_norms = q.residual_norms / (q.norms + 1e-10)

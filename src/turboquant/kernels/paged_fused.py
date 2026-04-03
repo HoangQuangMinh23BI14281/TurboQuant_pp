@@ -16,7 +16,7 @@ def _get_packing_params(bits: int):
 
 @triton.jit
 def _turboquant_paged_fused_kernel(
-    Q_ROT_ptr, Q_SKETCH_ptr,
+    Q_ROT_ptr,
     K_INDICES_ptr, K_SIGNS_ptr, K_METADATA_ptr,
     V_INDICES_ptr, V_METADATA_ptr,
     K_CENTROIDS_ptr,
@@ -32,7 +32,6 @@ def _turboquant_paged_fused_kernel(
     stride_sum_b, stride_sum_h, stride_sum_attr, stride_sum_d,
     stride_imp_b, stride_imp_h,
     stride_qr_bh, stride_qr_d,
-    stride_qs_bh, stride_qs_d,
     stride_o_bh, stride_o_d,
     N, D,
     K_BITS, K_VALS_PER_BYTE,
@@ -51,8 +50,7 @@ def _turboquant_paged_fused_kernel(
     d_range = tl.arange(0, 128)
     d_mask = d_range < D
     
-    q_rot = tl.load(Q_ROT_ptr + pid_bh * stride_qr_bh + d_range, mask=d_mask, other=0.0).to(tl.float32)
-    q_sk = tl.load(Q_SKETCH_ptr + pid_bh * stride_qs_bh + d_range, mask=d_mask, other=0.0).to(tl.float32)
+    q_rot = tl.load(Q_ROT_ptr + pid_bh * stride_qr_bh + d_range, mask=d_range < D, other=0.0).to(tl.float32)
 
     m_i = tl.zeros([1], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([1], dtype=tl.float32)
@@ -103,7 +101,8 @@ def _turboquant_paged_fused_kernel(
             k_mse = tl.load(K_CENTROIDS_ptr + ki).to(tl.float32) * kn * ks
             k_qjl = (ksi.to(tl.float32) * 2.0 - 1.0) * kr * QJL_SCALE
             
-            scores = tl.sum(q_rot[None, :] * k_mse + q_sk[None, :] * k_qjl, 1) * SM_SCALE
+            # SOTA V1.1.0: Direct Sign (Unified Query Domain)
+            scores = tl.sum(q_rot[None, :] * (k_mse + k_qjl), 1) * SM_SCALE
             scores = tl.where(n_mask, scores, float("-inf"))
             
             m_new = tl.maximum(m_i, tl.max(scores, 0))
@@ -135,7 +134,8 @@ def _turboquant_paged_fused_kernel(
             l_i = l_i * alpha + tl.sum(p, 0)
             m_i = m_new
 
-    tl.store(OUT_ptr + pid_bh * stride_o_bh + d_range, (acc / l_i).to(tl.float32), mask=d_mask)
+    # SOTA: add safety epsilon to prevent NaN if all blocks are skipped
+    tl.store(OUT_ptr + pid_bh * stride_o_bh + d_range, (acc / (l_i + 1e-10)).to(tl.float32), mask=d_mask)
 
 def turboquant_paged_fused_attention(
     query: torch.Tensor,
@@ -150,11 +150,10 @@ def turboquant_paged_fused_attention(
     head_dim = kv_cache.head_dim
     q_view = query.reshape(n_heads, head_dim)
     
-    q_rot, q_sketch = kv_cache.k_quantizer.transform_query(q_view)
+    q_rot, _ = kv_cache.k_quantizer.transform_query(q_view)
     D = q_rot.shape[-1]
     BH = n_heads 
     q_rot = q_rot.reshape(BH, D)
-    q_sketch = q_sketch.reshape(BH, D)
     
     # SOTA Pillar 1: Luôn trừ 1 bit cho QJL Sign!
     k_mse_bits = k_bits - 1 
@@ -183,7 +182,6 @@ def turboquant_paged_fused_attention(
     grid = (BH,)
     _turboquant_paged_fused_kernel[grid](
         Q_ROT_ptr=q_rot,
-        Q_SKETCH_ptr=q_sketch,
         K_INDICES_ptr=pool.k_indices,
         K_SIGNS_ptr=pool.k_qjl,
         K_METADATA_ptr=pool.k_metadata,
@@ -202,7 +200,6 @@ def turboquant_paged_fused_attention(
         stride_sum_b=ss[0], stride_sum_h=ss[1], stride_sum_attr=ss[2], stride_sum_d=ss[3],
         stride_imp_b=ims[0], stride_imp_h=ims[1],
         stride_qr_bh=q_rot.stride(0), stride_qr_d=q_rot.stride(1),
-        stride_qs_bh=q_sketch.stride(0), stride_qs_d=q_sketch.stride(1),
         stride_o_bh=out.stride(0), stride_o_d=out.stride(1),
         N=context_len, D=D,
         K_BITS=k_mse_bits, K_VALS_PER_BYTE=k_vpb,

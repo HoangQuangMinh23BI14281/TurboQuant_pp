@@ -42,9 +42,9 @@ def test_quest_skip_logic():
     pool = KVBlockPool(num_blocks=4, head_dim=head_dim, n_heads=n_heads, device=device)
     cache = TurboQuantKVCache(layer_idx=1, pool=pool)
     
-    # Block 1: Signal (Value 10)
+    # Block 1: Signal (Value 0.1)
     for _ in range(pool.tokens_per_block):
-        cache.append(torch.ones(1, n_heads, 1, head_dim, device=device)*10.0, 
+        cache.append(torch.ones(1, n_heads, 1, head_dim, device=device)*0.1, 
                     torch.ones(1, n_heads, 1, head_dim, device=device))
         
     # Block 2: Silence (Value 0.0000001)

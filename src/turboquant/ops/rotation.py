@@ -25,37 +25,44 @@ class TurboQuantRotation(nn.Module):
         self.register_buffer("all_signs", torch.stack(all_signs))
         
         # SOTA: pre-register UNNORMALIZED Hadamard matrix for O(1) matmul scaling
-        # We keep it as +1/1 for numerical stability (dividing by sqrt(d) at the end)
+        # We keep it as +1/1 for numerical stability
         from .wht import get_wht_matrix
         self.register_buffer("wht_mat", get_wht_matrix(d, normalized=False))
-        self.register_buffer("inv_sqrt_d", torch.tensor(1.0 / (d ** 0.5), dtype=torch.float64))
+        # FUSED SCALING: Total scale is (1/sqrt(d))^n_passes = 1 / d^(n/2)
+        # This prevents rounding accumulated by irrational sqrt(d) at each pass
+        self.register_buffer("final_scale", torch.tensor(1.0 / (d ** (n_passes / 2.0)), dtype=torch.float64))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Applies Cascaded SRHT (Sign -> WHT) x N passes
+        Note: Scaling is fused to the end for 1e-15 precision parity.
         """
         out = x
+        h_mat = self.wht_mat.to(device=out.device, dtype=out.dtype)
         for i in range(self.n_passes):
             # 1. Apply pass-specific sign (Robust to device/dtype mismatch)
             out = apply_sign_array(out, self.all_signs[i])
             # 2. Vectorized WHT (Synchronize Device & Dtype)
-            # Matmul with unnormalized matrix then scale for 1e-15 stability
-            h_mat = self.wht_mat.to(device=out.device, dtype=out.dtype)
-            scale = self.inv_sqrt_d.to(device=out.device, dtype=out.dtype)
-            out = torch.matmul(out, h_mat) * scale
-        return out
+            # Matmul with unnormalized matrix (integer-exact additions)
+            out = torch.matmul(out, h_mat)
+        
+        # 3. Apply Fused Scale (Synchronized Device & Dtype)
+        return out * self.final_scale.to(device=out.device, dtype=out.dtype)
 
     def inverse(self, x: torch.Tensor) -> torch.Tensor:
         """
         SRHT is orthonormal, thus its own inverse (with reversed sign order)
+        Note: Scaling is fused for 1e-15 precision parity.
         """
         out = x
+        h_mat = self.wht_mat.to(device=out.device, dtype=out.dtype)
+        # Apply Fused Scale first (Inverse of the forward's final scale is the same)
+        out = out * self.final_scale.to(device=out.device, dtype=out.dtype)
+        
         for i in reversed(range(self.n_passes)):
-            # Hadamard is its own inverse (Synchronize Device & Dtype)
-            h_mat = self.wht_mat.to(device=out.device, dtype=out.dtype)
-            scale = self.inv_sqrt_d.to(device=out.device, dtype=out.dtype)
-            out = torch.matmul(out, h_mat) * scale
-            # Sign is its own inverse (Robust to device/dtype mismatch)
+            # 1. Hadamard matmul (Integer additions)
+            out = torch.matmul(out, h_mat)
+            # 2. Sign is its own inverse (Robust to device/dtype mismatch)
             out = apply_sign_array(out, self.all_signs[i])
         return out
 
