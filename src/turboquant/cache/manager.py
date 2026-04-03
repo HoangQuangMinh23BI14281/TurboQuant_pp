@@ -64,6 +64,10 @@ class TurboQuantKVCache(Cache):
         else:
             self.k_quantizer = None
             self.v_quantizer = None
+            
+        # SOTA: Lazy FP16 Storage (Allocated only for FP16-routed layers)
+        self.k_fp16: Dict[int, torch.Tensor] = {}
+        self.v_fp16: Dict[int, torch.Tensor] = {}
         
         # Paged Attention State
         self.block_table = []
@@ -131,17 +135,18 @@ class TurboQuantKVCache(Cache):
             self.pool.k_summaries[current_block_id, :, 1, :] = torch.max(self.pool.k_summaries[current_block_id, :, 1, :], k_in)
             
         if self.strategy == QuantizationStrategy.FP16:
-            # Native FP16 Path: No compression, straight to pool
-            self.pool.k_fp16[current_block_id, :, slot_offset] = k_in
-            self.pool.v_fp16[current_block_id, :, slot_offset] = v_in
-            
-            # Update Quest summaries for FP16 too
-            if slot_offset == 0:
-                self.pool.k_summaries[current_block_id, :, 0, :] = k_in
-                self.pool.k_summaries[current_block_id, :, 1, :] = k_in
-            else:
-                self.pool.k_summaries[current_block_id, :, 0, :] = torch.min(self.pool.k_summaries[current_block_id, :, 0, :], k_in)
-                self.pool.k_summaries[current_block_id, :, 1, :] = torch.max(self.pool.k_summaries[current_block_id, :, 1, :], k_in)
+            # Native FP16 Path: Allocated only when Manager identifies FP16 strategy
+            if current_block_id not in self.k_fp16:
+                self.k_fp16[current_block_id] = torch.zeros(
+                    (self.n_heads, self.tokens_per_block, self.head_dim),
+                    dtype=self.dtype, device=self.device
+                )
+                self.v_fp16[current_block_id] = torch.zeros(
+                    (self.n_heads, self.tokens_per_block, self.head_dim),
+                    dtype=self.dtype, device=self.device
+                )
+            self.k_fp16[current_block_id][:, slot_offset] = k_in
+            self.v_fp16[current_block_id][:, slot_offset] = v_in
         else:
             # 2. Key Cache with SOTA Pillar 2: Sticky Metadata
             if slot_offset == 0:
@@ -238,32 +243,8 @@ class TurboQuantKVCache(Cache):
             quest_threshold=quest_threshold
         )
 
-    def evict_idle_blocks(self, threshold: float = 1e-4, min_keep: int = 1):
-        """
-        H2O (Heavy Hitter Oracle): Evict blocks with low importance scores.
-        threshold: Cumulative importance threshold below which a block is considered for eviction.
-        min_keep: Minimum number of most recent blocks to always keep (for local context).
-        """
-        if len(self.block_table) <= min_keep:
-            return # Nothing to evict
-            
-        # Get importance scores for blocks assigned to this layer
-        # scores shape: (num_blocks_in_table, n_heads)
-        physical_ids = torch.tensor(self.block_table[:-min_keep], dtype=torch.long, device=self.device)
-        importance_scores = self.pool.block_importance[physical_ids].mean(dim=-1) # Average importance across heads
-        
-        # Identify indices to evict (Score < threshold)
-        to_evict_mask = importance_scores < threshold
-        indices_to_evict = torch.where(to_evict_mask)[0].cpu().tolist()
-        
-        if not indices_to_evict:
-            return
-            
-        # Perform eviction (Reverse order to maintain indexing)
-        for idx in sorted(indices_to_evict, reverse=True):
-            block_id = self.block_table.pop(idx)
-            self.pool.free_block(block_id)
-            self.num_tokens -= self.tokens_per_block
-            
-        # Reset importance after eviction to allow new blocks to prove themselves
-        self.pool.block_importance[physical_ids].zero_()
+    # def evict_idle_blocks(self, threshold: float = 1e-4, min_keep: int = 1):
+    #     """
+    #     H2O (Heavy Hitter Oracle): Frozen to prevent logical-physical mapping corruption.
+    #     """
+    #     pass

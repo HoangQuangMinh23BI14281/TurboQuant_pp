@@ -75,16 +75,6 @@ class KVBlockPool:
             dtype=torch.float32, device=self.device
         )
         
-        # NATIVE Path Storage: Paged FP16 Buffers (used when quantizer is None)
-        self.k_fp16 = torch.zeros(
-            (num_blocks, n_heads, tokens_per_block, head_dim),
-            dtype=self.dtype, device=self.device
-        )
-        self.v_fp16 = torch.zeros(
-            (num_blocks, n_heads, tokens_per_block, head_dim),
-            dtype=self.dtype, device=self.device
-        )
-        
         # 3. Quest & H2O Accelerators
         # k_summaries: (num_blocks, n_heads, 2, head_dim) -> [min, max] for block-level Quest skipping
         self.k_summaries = torch.zeros(
@@ -123,7 +113,5 @@ class KVBlockPool:
         self.k_metadata.zero_()
         self.v_indices.zero_()
         self.v_metadata.zero_()
-        self.k_fp16.zero_()
-        self.v_fp16.zero_()
         self.k_summaries.zero_()
         self.block_importance.zero_()

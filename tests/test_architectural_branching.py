@@ -37,9 +37,9 @@ def test_fp16_paged_storage_and_gather():
     
     # Check if stored in fp16 buffer
     bid = cache.block_table[0]
-    # In pool.k_fp16 shape: (num_blocks, n_heads, tokens_per_block, head_dim)
-    assert torch.allclose(pool.k_fp16[bid, :, 0], k_split.squeeze(0).squeeze(1))
-    assert torch.allclose(pool.v_fp16[bid, :, 0], v_split.squeeze(0).squeeze(1))
+    # In cache.k_fp16 dictionary mapping bid to (n_heads, tokens, dim)
+    assert torch.allclose(cache.k_fp16[bid][:, 0], k_split.squeeze(0).squeeze(1))
+    assert torch.allclose(cache.v_fp16[bid][:, 0], v_split.squeeze(0).squeeze(1))
 
 def test_hybrid_precision_paged_attention():
     """

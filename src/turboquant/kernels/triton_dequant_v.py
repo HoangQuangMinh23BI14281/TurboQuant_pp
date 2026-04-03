@@ -16,6 +16,8 @@ def _dequantize_v_kernel(
     # Shapes
     N, D,
     GROUP_SIZE: tl.constexpr,
+    V_BITS: tl.constexpr,
+    V_VALS_PER_BYTE: tl.constexpr,
     # Block sizes
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -35,11 +37,16 @@ def _dequantize_v_kernel(
     n_mask = n_offs < N
     d_mask = d_offs < D
     
-    # Load indices
-    v_idx = tl.load(
-        V_IDX_ptr + pid_bh * stride_v_bh + n_offs[:, None] * stride_v_n + d_offs[None, :] * stride_v_d,
+    # Load packed indices
+    v_idx_packed = tl.load(
+        V_IDX_ptr + pid_bh * stride_v_bh + n_offs[:, None] * stride_v_n + (d_offs[None, :] // V_VALS_PER_BYTE) * stride_v_d,
         mask=n_mask[:, None] & d_mask[None, :], other=0
-    ).to(tl.float32)
+    ).to(tl.int32)
+    
+    # Bit Unpacking
+    v_sub_idx = d_offs % V_VALS_PER_BYTE
+    v_bit_mask = (1 << V_BITS) - 1
+    v_idx = (v_idx_packed >> (v_sub_idx * V_BITS)) & v_bit_mask
 
     # Calculate group mapping
     g_offs = d_offs // GROUP_SIZE
@@ -65,24 +72,30 @@ def _dequantize_v_kernel(
         mask=n_mask[:, None] & d_mask[None, :]
     )
 
-def dequantize_value_triton(indices, scales, zeros, group_size=128):
+def dequantize_value_triton(indices, scales, zeros, group_size=128, bits=4):
     """
-    Python wrapper for the standalone Value dequantization kernel.
+    Python wrapper for the standalone Value dequantization kernel (SOTA: Packed).
     """
     assert indices.is_cuda and scales.is_cuda and zeros.is_cuda
     
-    # Dimensions: Indices (B*H, N, D), Scales (B*H, N, G), Zeros (B*H, N, G)
+    from .triton_utils import _get_packing_params
+    v_eff_bits, v_vals_per_byte = _get_packing_params(bits)
+    
+    # Dimensions: Indices (B*H, N, packed_D), Scales (B*H, N, G), Zeros (B*H, N, G)
     if indices.dim() == 4:
-        B, H, N, D = indices.shape
-        indices_flat = indices.view(B * H, N, D)
+        B, H, N, PACKED_D = indices.shape
+        D = PACKED_D * v_vals_per_byte
+        indices_flat = indices.view(B * H, N, PACKED_D)
         scales_flat = scales.view(B * H, N, -1)
         zeros_flat = zeros.view(B * H, N, -1)
     else:
-        BH, N, D = indices.shape
+        BH, N, PACKED_D = indices.shape
+        D = PACKED_D * v_vals_per_byte
         indices_flat, scales_flat, zeros_flat = indices, scales, zeros
-        BH, N, D = indices_flat.shape
-
-    out = torch.empty_like(indices_flat, dtype=torch.float16)
+        BH, N, PACKED_D = indices_flat.shape
+        
+    # SOTA: Output is ALWAYS the full unpacked dimension D
+    out = torch.empty((indices_flat.shape[0], N, D), device=indices.device, dtype=torch.float16)
     
     BLOCK_N = 16
     BLOCK_D = 64
@@ -97,9 +110,13 @@ def dequantize_value_triton(indices, scales, zeros, group_size=128):
         out.stride(0), out.stride(1), out.stride(2),
         N, D,
         GROUP_SIZE=group_size,
+        V_BITS=v_eff_bits,
+        V_VALS_PER_BYTE=v_vals_per_byte,
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
         num_warps=4
     )
     
-    return out.view(indices.shape) if indices.dim() == 4 else out
+    if indices.dim() == 4:
+        return out.view(B, H, N, D)
+    return out

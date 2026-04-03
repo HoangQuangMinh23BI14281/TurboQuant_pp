@@ -107,11 +107,12 @@ def test_kv_manager_boundary_protection():
     cache = TurboQuantKVCache(layer_idx=0, pool=pool, routing=routing)
     assert cache.strategy == QuantizationStrategy.FP16
     
-    # Append should go to k_fp16 pool, not k_indices
+    # Append should go to k_fp16 local dictionary, not global pool k_indices
     k = torch.randn(1, n_heads, 1, head_dim)
     v = torch.randn(1, n_heads, 1, head_dim)
     cache.append(k, v)
     
     bid = cache.block_table[0]
-    assert torch.any(pool.k_fp16[bid, 0, 0] != 0)
+    # Verify in LOCAL manager storage, not pool
+    assert torch.any(cache.k_fp16[bid][0, 0] != 0)
     assert torch.all(pool.k_indices[bid, 0, 0] == 0)

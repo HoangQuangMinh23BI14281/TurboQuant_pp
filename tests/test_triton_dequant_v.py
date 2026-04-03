@@ -49,8 +49,10 @@ def test_value_dequant_bit_exact(batch, heads, seq_len, head_dim, group_size):
     # Reference
     expected = dequantize_v_pytorch(indices, scales, zeros, group_size)
     
-    # Triton
-    actual = dequantize_value_triton(indices, scales, zeros, group_size)
+    # Triton (Expects PACKED indices)
+    from turboquant.quant.quant_base import pack_indices
+    indices_packed = pack_indices(indices.view(BH * seq_len, head_dim), bits=4).view(BH, seq_len, -1)
+    actual = dequantize_value_triton(indices_packed, scales, zeros, group_size, bits=4)
     
     # Check bit-exactness (using small atol for FP16 precision differences)
     torch.testing.assert_close(actual, expected, atol=1e-3, rtol=1e-3)

@@ -116,26 +116,19 @@ def _turboquant_fused_decode_kernel(
         l_i = l_i * alpha + tl.sum(p, 0)
         acc = acc * alpha
 
-        # ── Part 3: Value Aggregation (Hybrid Vectorized Unpacking) ──
-        for byte_idx in range(PACKED_D_V):
-            v_packed = tl.load(V_DATA_ptr + pid_bh * stride_v_bh + n_offs * stride_v_n + byte_idx * stride_v_d,
-                              mask=n_mask, other=0).to(tl.int32)
-            
-            for sub in range(V_VALS_PER_BYTE):
-                coord_idx = byte_idx * V_VALS_PER_BYTE + sub
-                if coord_idx < D:
-                    v_idx = ((v_packed >> (sub * V_BITS)) & V_BIT_MASK).to(tl.float32)
-                    
-                    g_idx = coord_idx // GROUP_SIZE
-                    v_s = tl.load(V_SCALES_ptr + pid_bh * stride_vs_bh + n_offs * stride_vs_n + g_idx * stride_vs_g,
-                                 mask=n_mask, other=1.0).to(tl.float32)
-                    v_z = tl.load(V_ZEROS_ptr + pid_bh * stride_vz_bh + n_offs * stride_vz_n + g_idx * stride_vz_g,
-                                 mask=n_mask, other=0.0).to(tl.float32)
-                    
-                    v_val = v_idx * v_s + v_z
-                    acc_val = tl.sum(p * v_val, 0)
-                    mask_d = (d_offs == coord_idx)
-                    acc = tl.where(mask_d, acc + acc_val, acc)
+        # ── Part 3: Value Aggregation (CHUẨN VECTOR HÓA 2D) ──
+        v_byte_idx = d_offs // V_VALS_PER_BYTE
+        v_sub_idx = d_offs % V_VALS_PER_BYTE
+        
+        v_packed = tl.load(V_DATA_ptr + pid_bh * stride_v_bh + n_offs[:, None] * stride_v_n + v_byte_idx[None, :] * stride_v_d, mask=n_mask[:, None], other=0).to(tl.int32)
+        vi = (v_packed >> (v_sub_idx * V_BITS)) & V_BIT_MASK
+        
+        v_group_idx = d_offs // GROUP_SIZE
+        v_s = tl.load(V_SCALES_ptr + pid_bh * stride_vs_bh + n_offs[:, None] * stride_vs_n + v_group_idx[None, :] * stride_vs_g, mask=n_mask[:, None], other=1.0).to(tl.float32)
+        v_z = tl.load(V_ZEROS_ptr + pid_bh * stride_vz_bh + n_offs[:, None] * stride_vz_n + v_group_idx[None, :] * stride_vz_g, mask=n_mask[:, None], other=0.0).to(tl.float32)
+        
+        v_deq = vi.to(tl.float32) * v_s + v_z
+        acc = acc * alpha + tl.sum(p[:, None] * v_deq, 0)
 
         m_i = m_new
 

@@ -77,9 +77,9 @@ def paged_turboquant_attention(
         for i in range(num_tokens):
             block_idx = i // tokens_per_block
             slot_idx = i % tokens_per_block
-            physical_block = block_table[block_idx]
-            k_all.append(pool.k_fp16[physical_block, :, slot_idx])
-            v_all.append(pool.v_fp16[physical_block, :, slot_idx])
+            physical_block = block_table[block_idx].item()
+            k_all.append(kv_cache.k_fp16[physical_block][:, slot_idx])
+            v_all.append(kv_cache.v_fp16[physical_block][:, slot_idx])
             
         k_cache = torch.stack(k_all, dim=1).unsqueeze(0).to(query.dtype)
         v_cache = torch.stack(v_all, dim=1).unsqueeze(0).to(query.dtype)
