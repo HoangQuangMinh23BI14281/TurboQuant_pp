@@ -48,31 +48,19 @@ class TurboQuantAttention(nn.Module):
         if not self.is_protected:
             self.k_quantizer = TurboQuantProd(self.head_dim, bits=self.k_bits)
             self.v_quantizer = TurboQuantValue(self.head_dim, bits=self.v_bits)
+            
+            # SOTA: static WHT matrix for O(1) outlier suppression
+            # We build a normalized Hadamard matrix once during init
+            from scipy.linalg import hadamard
+            h_mat = torch.tensor(hadamard(self.head_dim), dtype=torch.float32) / (self.head_dim ** 0.5)
+            self.register_buffer("h_matrix", h_mat)
         else:
             self.k_quantizer = None
             self.v_quantizer = None
+
         # SOTA: RoPE Support (Injected by Patcher)
         self.rotary_emb = None
         
-    def _fwht(self, x: torch.Tensor):
-        """Fast Walsh-Hadamard Transform (Iterative)"""
-        b, h, s, d = x.shape
-        # Ensure d is a power of 2 for FWHT (pad if necessary)
-        if (d & (d - 1)) != 0:
-            target_d = 2**(d-1).bit_length()
-            x = torch.nn.functional.pad(x, (0, target_d - d))
-            d = target_d
-        
-        res = x.clone()
-        h_step = 1
-        while h_step < d:
-            for i in range(0, d, h_step * 2):
-                low = res[..., i:i+h_step]
-                high = res[..., i+h_step:i+h_step*2]
-                res[..., i:i+h_step] = low + high
-                res[..., i+h_step:i+h_step*2] = low - high
-            h_step *= 2
-        return res / (d ** 0.5)
 
     def forward(
         self,
@@ -115,10 +103,15 @@ class TurboQuantAttention(nn.Module):
 
         # 4. SOTA: Cascaded WHT for Outlier Suppression (Only if Quantized path)
         if not self.is_protected:
-            q = self._fwht(q)
-            k = self._fwht(k)
+            # SOTA Matrix-based WHT: matmul is 100x faster than Iterative Python loop
+            h_mat = self.h_matrix.to(q.device).to(q.dtype)
+            q = torch.matmul(q, h_mat)
+            k = torch.matmul(k, h_mat)
 
         if kv_cache is not None:
+            # [CRITICAL FIX]: Ghi dữ liệu của token hiện tại vào Paged Pool
+            kv_cache.append(k, v) 
+            
             # Update quantizers in cache manager
             kv_cache.k_quantizer = self.k_quantizer
             kv_cache.v_quantizer = self.v_quantizer

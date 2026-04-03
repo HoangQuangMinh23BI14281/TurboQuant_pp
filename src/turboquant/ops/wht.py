@@ -26,50 +26,25 @@ def generate_hadamard(d: int, normalized: bool = True) -> torch.Tensor:
         
     return H
 
+def get_wht_matrix(d: int, normalized: bool = True) -> torch.Tensor:
+    """
+    Returns a Hadamard matrix for performance (via matmul).
+    Arg `normalized`: False returns raw +1/-1 matrix for precision stability.
+    """
+    return generate_hadamard(d, normalized=normalized)
+
 def fwht(x: torch.Tensor) -> torch.Tensor:
     """
     Fast Walsh-Hadamard Transform (FWHT).
-    Optimized iterative implementation for PyTorch.
-    Matching llama.cpp scaling: no normalization in forward pass.
-    
-    Complexity: O(d log d) where d is the last dimension of x.
-    x shape: (..., d) where d is a power of 2.
+    DEPRECATED: Use get_wht_matrix and torch.matmul for performance.
     """
     d = x.shape[-1]
-    if (d & (d - 1)) != 0:
-        raise ValueError("Last dimension of x must be a power of 2")
-
-    # Standard iterative FWHT
-    # x shape: (..., d)
-    original_shape = x.shape
-    original_dtype = x.dtype
-    # Use float32 for half-precision inputs, otherwise use input dtype (e.g. float64)
-    calc_dtype = torch.float32 if x.dtype in [torch.half, torch.bfloat16] else x.dtype
-    res = x.to(calc_dtype).reshape(-1, d)
-    
-    num_steps = int(math.log2(d))
-    for i in range(num_steps):
-        # Butterfly distance for this step: 2^i
-        group_size = 2**i
-        num_groups = d // (2 * group_size)
-        
-        # Reshape to (batch, num_groups, 2, group_size)
-        res = res.view(-1, num_groups, 2, group_size)
-        
-        # Apply butterfly: [a+b, a-b]
-        a = res[:, :, 0, :]
-        b = res[:, :, 1, :]
-        res = torch.stack([a + b, a - b], dim=2)
-        
-    res = res.reshape(original_shape)
-    
-    # Orthonormal normalization: divide by sqrt(d) (ensuring dtype preservation)
-    res_norm = res / torch.tensor(math.sqrt(d), dtype=res.dtype, device=res.device)
-    return res_norm.to(original_dtype)
+    h_mat = get_wht_matrix(d).to(x.device).to(x.dtype)
+    return torch.matmul(x, h_mat)
 
 def ifwht(x: torch.Tensor) -> torch.Tensor:
     """
     Inverse Fast Walsh-Hadamard Transform.
-    Since FWHT is now orthonormal, it is its own inverse.
+    Since FWHT is orthonormal, it is its own inverse.
     """
     return fwht(x)

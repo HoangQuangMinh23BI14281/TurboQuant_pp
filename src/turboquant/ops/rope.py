@@ -23,28 +23,19 @@ class RotaryPositionalEmbeddings(nn.Module):
     def _build_cache(self, seq_len: int, device: torch.device, dtype: torch.dtype):
         """
         Precomputes the cos and sin caches for a given sequence length.
+        SOTA Layout: (1, 1, seq_len, d) for Broadcasting with (B, H, S, D)
         """
-        if self.cos_cached is not None and seq_len <= self.cos_cached.shape[0]:
+        if self.cos_cached is not None and seq_len <= self.cos_cached.shape[2]:
             return
 
-        # inv_freq = 1.0 / (base ** (arange(0, d, 2) / d))
-        # shape: (d / 2)
         inv_freq = 1.0 / (self.base ** (torch.arange(0, self.d, 2, device=device).float() / self.d))
-        
-        # t = [0, 1, 2, ..., seq_len-1]
         t = torch.arange(seq_len, device=device).type_as(inv_freq)
-        
-        # freqs = einsum(t, inv_freq) -> (seq_len, d / 2)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
-        
-        # Emb = [freqs, freqs] -> (seq_len, d)
         emb = torch.cat((freqs, freqs), dim=-1)
         
-        # Cache cos and sin: (seq_len, 1, 1, d) to support broadcasting with (seq, batch, heads, d) 
-        # or (batch, heads, seq, d) depending on layout. 
-        # Note: We use [:, None, None, :] to match notebook's (seq, batch, head, d) assumption.
-        self.cos_cached = emb.cos()[:, None, None, :].to(dtype)
-        self.sin_cached = emb.sin()[:, None, None, :].to(dtype)
+        # SOTA: (1, 1, seq_len, d)
+        self.cos_cached = emb.cos()[None, None, :, :].to(dtype)
+        self.sin_cached = emb.sin()[None, None, :, :].to(dtype)
 
     def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -58,17 +49,14 @@ class RotaryPositionalEmbeddings(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Applies RoPE to the input tensor.
-        Args:
-            x (torch.Tensor): Input tensor of shape (seq_len, batch, num_heads, d_head)
-        Returns:
-            torch.Tensor: Tensor with RoPE applied.
+        SOTA Architecture Layout: (batch, num_heads, seq_len, d_head)
         """
-        seq_len = x.shape[0]
+        seq_len = x.shape[2] # Corrected dimensionality probe
         self._build_cache(seq_len, x.device, x.dtype)
         
-        # BROADCASTING: self.cos_cached is (seq_len, 1, 1, d)
-        # x is (seq_len, batch, heads, d)
-        return (x * self.cos_cached[:seq_len]) + (self._rotate_half(x) * self.sin_cached[:seq_len])
+        # BROADCASTING: self.cos_cached is (1, 1, seq_len, d)
+        # x is (batch, heads, seq_len, d)
+        return (x * self.cos_cached[:, :, :seq_len, :]) + (self._rotate_half(x) * self.sin_cached[:, :, :seq_len, :])
 
 def apply_rope(q: torch.Tensor, k: torch.Tensor, base: int = 10_000) -> Tuple[torch.Tensor, torch.Tensor]:
     """

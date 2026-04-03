@@ -20,26 +20,37 @@ def get_llama_sign(signs: bytes, idx: int) -> float:
     """Get sign (-1.0 or +1.0) at index idx from sign bytes (matching llama.cpp logic)."""
     return -1.0 if ((signs[idx >> 3] >> (idx & 7)) & 1) else 1.0
 
-def generate_sign_array(d: int, seed: int = 42, use_llama_preset: str = None) -> torch.Tensor:
+def generate_sign_array(d: int, seed: int = 42, use_llama_preset: str = None, device: torch.device = None, dtype: torch.dtype = torch.float32) -> torch.Tensor:
     """
-    Generate a 1D tensor of signs (+1 or -1).
+    Generate a 1D tensor of signs (+1 or -1) using pure PyTorch vectorization.
     Preserves determinism via seed or use_llama_preset.
-    
-    Args:
-        d: length of the array
-        seed: used if use_llama_preset is None
-        use_llama_preset: 'tbq' or 'qjl' to use fixed llama.cpp patterns
     """
-    if use_llama_preset == 'tbq':
-        return torch.tensor([get_llama_sign(TBQ_SIGNS, i % 256) for i in range(d)])
-    elif use_llama_preset == 'qjl':
-        return torch.tensor([get_llama_sign(QJL_SIGNS, i % 256) for i in range(d)])
+    if use_llama_preset in ['tbq', 'qjl']:
+        # 1. Chọn mảng byte
+        sign_bytes = TBQ_SIGNS if use_llama_preset == 'tbq' else QJL_SIGNS
+        byte_tensor = torch.tensor(list(sign_bytes), dtype=torch.uint8, device=device)
+        
+        # 2. Vector hóa việc tính toán Index
+        idx = torch.arange(d, device=device)
+        byte_idx = (idx // 8) % len(sign_bytes)  # Xoay vòng nếu d > 256
+        bit_idx = idx % 8
+        
+        # 3. Dịch bit song song trên GPU/CPU
+        bits = (byte_tensor[byte_idx] >> bit_idx) & 1
+        
+        # 4. Map (0 -> 1.0) và (1 -> -1.0)
+        signs = torch.where(bits == 1, -1.0, 1.0).to(dtype)
+        return signs
     
     # Generic random sign array
-    generator = torch.Generator().manual_seed(seed)
-    # Generate random bits (0 or 1) and map to -1 or 1
-    bits = torch.randint(0, 2, (d,), generator=generator)
-    return (bits.float() * 2.0 - 1.0)
+    generator = torch.Generator(device=device)
+    if device is not None and device.type == 'cuda':
+        generator.manual_seed(seed)
+    else:
+        generator.manual_seed(seed)
+        
+    bits = torch.randint(0, 2, (d,), generator=generator, device=device)
+    return (bits.to(dtype) * 2.0 - 1.0)
 
 def apply_sign_array(x: torch.Tensor, signs: torch.Tensor) -> torch.Tensor:
     """

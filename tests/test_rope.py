@@ -60,3 +60,26 @@ def test_apply_rope_functional(d):
     
     # Verify k_out is different from k (rotation applied)
     assert not torch.allclose(k, k_out)
+
+@pytest.mark.parametrize("d", [128])
+def test_rope_architecture_alignment(d):
+    """
+    EXTREME TORTURE: Verify RoPE with (Batch=2, Heads=8, Seq=32).
+    If RoPE assumes (Seq, Batch, Heads, D), it will incorrectly use Batch=2 as SeqLen.
+    """
+    batch, heads, seq, dim = 2, 8, 32, d
+    rope = RotaryPositionalEmbeddings(dim)
+    
+    # Input in SOTA layout: (Batch, Heads, Seq, Dim)
+    x = torch.randn(batch, heads, seq, dim)
+    
+    # This should NOT fail and should apply rotation across all 32 tokens
+    try:
+        x_out = rope(x)
+    except Exception as e:
+        pytest.fail(f"RoPE failed on SOTA (B,H,S,D) layout: {e}")
+        
+    assert x_out.shape == (batch, heads, seq, dim)
+    
+    # Verify that token 31 is actually rotated (not just using identity because cache was too small)
+    assert not torch.allclose(x[:, :, 31, :], x_out[:, :, 31, :])
