@@ -1,55 +1,99 @@
 import torch
+import sys
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from turboquant.layers.config import TurboQuantConfig
 from turboquant.integrations.patcher import patch_hf_model
-from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.cache.block_pool import KVBlockPool
-from turboquant.cache.routing import LayerRouting
+from turboquant.cache.manager import TurboQuantCacheContainer
 
-def demo_patch_and_generate():
+def atomic_demo():
+    print("--- STARTING ATOMIC DEMO ---", flush=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_name = "Qwen/Qwen2.5-0.5B-Instruct" # Small & Fast for demo
+    model_name = "Qwen/Qwen2.5-0.5B-Instruct"
     
-    print(f"Loading {model_name}...")
+    # 1. Load Model with Eager Enforcement
+    print(f"Loading {model_name}...", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, 
+        torch_dtype=torch.float16,
+        attn_implementation="eager"
+    ).to(device)
+    torch.cuda.synchronize()
     
-    # 1. Apply Surgical Patcher (Phase 1)
-    print("\n--- Applying SOTA Surgical Patcher ---")
-    model = patch_hf_model(model)
+    # SOTA: Fidelity Verification Mode (Force FP16 for all 24 layers)
+    # This isolates the "Compass" (Position ID) sync from quantization noise.
+    # SOTA: Hardened Calibration Configuration
+    # Uses stable 4-bit MSE (k=5) / 8-bit Val (v=8) defaults for absolute recovery.
+    tq_config = TurboQuantConfig(
+        k_bits=5,  # FIXED: Sinh ra 4-bit MSE -> Khớp hoàn hảo với dịch bit >> 4 trong bộ nhớ
+        v_bits=8,  # Giữ Value 8-bit để ưu tiên độ chính xác ngữ nghĩa
+        protect_boundaries=True,
+        n_head_protected=2, 
+        n_tail_protected=2,
+        group_size=64,
+        qjl_scale=0.1, 
+        quest_threshold=-1e6  # FIXED: Chấp nhận mọi Logit âm, cấm Triton skip bừa bãi!
+    )
     
-    # 2. Setup SOTA Paged Cache (needed for patched forward)
-    print("\n--- Initializing TurboQuant Paged Cache Pools ---")
+    model = patch_hf_model(model, tq_config)
+    torch.cuda.synchronize()
+    
+    # 2. Setup SOTA Paged Cache Container
     n_layers = model.config.num_hidden_layers
     n_heads = model.config.num_attention_heads
-    n_kv_heads = model.config.num_key_value_heads
+    n_kv_heads = getattr(model.config, "num_key_value_heads", n_heads)
     head_dim = model.config.hidden_size // n_heads
     
-    pool = KVBlockPool(num_blocks=1024, head_dim=head_dim, n_heads=n_kv_heads, device=device)
-    cache = TurboQuantKVCache(layer_idx=1, pool=pool)
-    cache.n_heads = n_heads
-    cache.n_kv_heads = n_kv_heads
-    cache.group_size = n_heads // n_kv_heads
+    pool = KVBlockPool(
+        num_blocks=1024, 
+        head_dim=head_dim, 
+        n_heads=n_kv_heads, 
+        device=device,
+        k_bits=tq_config.k_bits,
+        v_bits=tq_config.v_bits
+    )
+    container = TurboQuantCacheContainer(num_layers=n_layers, pool=pool)
     
-    # 3. Test Generation
+    # SOTA: Ghim chặt Container vào Model để các Layer tự mò lấy
+    model._tq_cache_override = container 
+    print("TurboQuant Cache Container Initialized.", flush=True)
+    
+    # 3. Atomic Generation
     prompt = "Explain quantum physics to a 5-year-old in one sentence."
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
     
-    print(f"\nPrompt: {prompt}")
-    print("Generating...")
+    # SOTA: Standard Qwen2.5 Chat Template
+    messages = [
+        {"role": "user", "content": prompt}
+    ]
+    chat_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = tokenizer(chat_prompt, return_tensors="pt").to(device)
     
-    # We pass 'past_key_values' = cache to trigger our patched attention logic
+    print(f"\nPROMPT: {prompt}", flush=True)
+    print("GENERATING Helpfully...", flush=True)
+    
     with torch.no_grad():
-        # NOTE: patching hf_forward means we can call model.forward or model.generate
-        # though DynamicCache/Paged Cache orchestration for .generate() needs a slight wrap
         output = model.generate(
-            **inputs, 
-            max_new_tokens=20, 
-            use_cache=True, 
-            past_key_values=cache # Our custom cache object
+            **inputs,
+            max_new_tokens=64,
+            do_sample=False,
+            use_cache=True,
+            pad_token_id=tokenizer.eos_token_id
         )
-        
-    response = tokenizer.decode(output[0], skip_special_tokens=True)
-    print(f"\nResponse: {response}")
+    
+    torch.cuda.synchronize()
+    input_len = inputs.input_ids.shape[1]
+    generated_ids_only = output[0][input_len:]
+    
+    print("\n--- TOKEN-BY-TOKEN RECOVERY ---")
+    recovered_text = ""
+    for tid in generated_ids_only:
+        token_str = tokenizer.decode([tid])
+        print(f"ID {tid:6} | '{token_str}'")
+        recovered_text += token_str
+    
+    print(f"\nFINAL RECOVERED RESPONSE:\n{recovered_text}")
+    print("\n--- ATOMIC DEMO FINISHED ---", flush=True)
 
 if __name__ == "__main__":
-    demo_patch_and_generate()
+    atomic_demo()

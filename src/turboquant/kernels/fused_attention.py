@@ -57,38 +57,99 @@ def paged_turboquant_attention(
     qjl_scale: float,
     sm_scale: float,
     quest_threshold: float = 1e-4,
+    mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Consolidated Dispatcher for Paged Attention Path.
+    Handles Strategy-based precision branching (FP16 Fallback vs Triton Kernel).
     """
-    from turboquant.cache.routing import QuantizationStrategy
-    if kv_cache.strategy == QuantizationStrategy.FP16:
+    # SOTA: Precision Branching (Boundary Protection Support)
+    seq_q = query.shape[-2]
+    
+    # 1. FP16 Path or Quantized Prefill (PyTorch SDPA)
+    if kv_cache.k_quantizer is None or seq_q > 1:
         ptrs = kv_cache.get_paged_ptrs()
-        pool = ptrs["pool"]
-        block_table = ptrs["block_table"]
-        tokens_per_block = ptrs["tokens_per_block"]
         num_tokens = ptrs["num_tokens"]
+        tokens_per_block = ptrs["tokens_per_block"]
+        block_table = ptrs["block_table"]
         
         if num_tokens == 0:
             return torch.zeros_like(query)
             
         k_all = []
         v_all = []
-        for i in range(num_tokens):
-            block_idx = i // tokens_per_block
-            slot_idx = i % tokens_per_block
-            physical_block = block_table[block_idx].item()
-            k_all.append(kv_cache.k_fp16[physical_block][:, slot_idx])
-            v_all.append(kv_cache.v_fp16[physical_block][:, slot_idx])
+        
+        # SOTA: Hybrid Prefill (Lazy Dequantizer)
+        if kv_cache.k_quantizer is not None:
+            # Layer is quantized, but we are in Prefill -> Dequantize on-the-fly
+            from ..quant.quant_base import unpack_indices
+            from .paged_fused import compute_centroids
+            pool = kv_cache.pool
+            for i in range(num_tokens):
+                block_idx = i // tokens_per_block
+                slot_idx = i % tokens_per_block
+                p_id = block_table[block_idx].item()
+                li = kv_cache.layer_idx
+                
+                # Fetch MSE + Signs
+                ki = pool.k_indices[li, p_id, :, slot_idx]
+                ksi = pool.k_qjl[li, p_id, :, slot_idx]
+                kn = pool.k_metadata[li, p_id, :, slot_idx, 0]
+                ks = pool.k_metadata[li, p_id, :, slot_idx, 1]
+                kr = pool.k_metadata[li, p_id, :, slot_idx, 2]
+                
+                # Dequantize K (Algorithm 2 Restoration)
+                k_centroids = compute_centroids(k_bits - 1, dist='gaussian').to(query.device)
+                k_mse = k_centroids[ki.to(torch.long)] * kn.unsqueeze(-1) * ks.unsqueeze(-1)
+                
+                # QJL Restoration (Direct Sign)
+                ksi_unpacked = unpack_indices(ksi.unsqueeze(0), 1, pool.head_dim).squeeze(0)
+                k_qjl = (ksi_unpacked.float() * 2.0 - 1.0) * kr.unsqueeze(-1) * qjl_scale
+                
+                k_all.append((k_mse + k_qjl).to(query.dtype))
+                
+                # Dequantize V
+                v_vi = pool.v_indices[li, p_id, :, slot_idx]
+                v_sc = pool.v_metadata[li, p_id, :, :, 0]
+                v_zp = pool.v_metadata[li, p_id, :, :, 1]
+                
+                # Unpack dynamic (4-bit LSB or 8-bit)
+                if v_bits == 4:
+                    v_unpacked = torch.stack([v_vi & 0xF, v_vi >> 4], dim=-1).flatten(1)
+                else:
+                    v_unpacked = v_vi.float()
+                v_deq = v_unpacked.float() * v_sc + v_zp
+                v_all.append(v_deq.to(query.dtype))
+        else:
+            # Native FP16 Path
+            for i in range(num_tokens):
+                block_idx = i // tokens_per_block
+                slot_idx = i % tokens_per_block
+                physical_block = block_table[block_idx].item()
+                k_all.append(kv_cache.k_fp16[physical_block][:, slot_idx])
+                v_all.append(kv_cache.v_fp16[physical_block][:, slot_idx])
             
         k_cache = torch.stack(k_all, dim=1).unsqueeze(0).to(query.dtype)
         v_cache = torch.stack(v_all, dim=1).unsqueeze(0).to(query.dtype)
-        return torch.nn.functional.scaled_dot_product_attention(query, k_cache, v_cache)
+        
+        # GQA Repeat Interleave for SDPA
+        if query.shape[1] != k_cache.shape[1]:
+            scale = query.shape[1] // k_cache.shape[1]
+            k_cache = k_cache.repeat_interleave(scale, dim=1)
+            v_cache = v_cache.repeat_interleave(scale, dim=1)
+            
+        current_mask = mask if seq_q > 1 else None
+        real_is_causal = (seq_q > 1) and (current_mask is None)
+        
+        return torch.nn.functional.scaled_dot_product_attention(
+            query, k_cache.to(query.dtype), v_cache.to(query.dtype), 
+            attn_mask=current_mask, is_causal=real_is_causal
+        )
 
+    # 2. Triton Path (Decode Stage - Only 1 query token)
     if not HAS_TRITON or not query.is_cuda:
         raise RuntimeError("Paged Attention requires Triton and CUDA.")
     
-    # Delegate everything to the kernel-specific module to avoid circular dependency
     from .paged_fused import turboquant_paged_fused_attention as paged_dispatch
     return paged_dispatch(query, kv_cache, k_bits, v_bits, qjl_scale, sm_scale, quest_threshold)
 

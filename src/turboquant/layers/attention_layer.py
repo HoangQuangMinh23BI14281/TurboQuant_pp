@@ -9,6 +9,8 @@ from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.kernels.fused_attention import turboquant_attention
 from turboquant.kernels.fused_attention import paged_turboquant_attention
 from turboquant.cache.routing import QuantizationStrategy
+from turboquant.ops.rope import RotaryPositionalEmbeddings
+from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb
 
 class TurboQuantAttention(nn.Module):
     """
@@ -23,6 +25,10 @@ class TurboQuantAttention(nn.Module):
         dim: int,
         num_heads: int,
         num_kv_heads: int,
+        q_bias: bool = False,
+        k_bias: bool = False,
+        v_bias: bool = False,
+        o_bias: bool = False,
     ):
         super().__init__()
         self.tq_config = tq_config
@@ -32,11 +38,11 @@ class TurboQuantAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.dim = dim
         
-        # 1. Standard Projections (Crucial: dim -> dim)
-        self.q_proj = nn.Linear(dim, dim, bias=False)
-        self.k_proj = nn.Linear(dim, dim // (num_heads // num_kv_heads), bias=False)
-        self.v_proj = nn.Linear(dim, dim // (num_heads // num_kv_heads), bias=False)
-        self.o_proj = nn.Linear(dim, dim, bias=False)
+        # 1. Standard Projections
+        self.q_proj = nn.Linear(dim, dim, bias=q_bias)
+        self.k_proj = nn.Linear(dim, (num_kv_heads * self.head_dim), bias=k_bias)
+        self.v_proj = nn.Linear(dim, (num_kv_heads * self.head_dim), bias=v_bias)
+        self.o_proj = nn.Linear(dim, dim, bias=o_bias)
         
         # 2. Strategy-based Quantization
         strategy = tq_config.get_strategy(layer_idx, total_layers)
@@ -44,23 +50,22 @@ class TurboQuantAttention(nn.Module):
         self.k_bits = tq_config.k_bits if not self.is_protected else 16
         self.v_bits = tq_config.v_bits if not self.is_protected else 16
         
-        # 3. Local Quantizers (Conditional)
         if not self.is_protected:
-            self.k_quantizer = TurboQuantProd(self.head_dim, bits=self.k_bits)
-            self.v_quantizer = TurboQuantValue(self.head_dim, bits=self.v_bits)
-            
-            # SOTA: static WHT matrix for O(1) outlier suppression
-            # We build a normalized Hadamard matrix once during init
-            from scipy.linalg import hadamard
-            h_mat = torch.tensor(hadamard(self.head_dim), dtype=torch.float32) / (self.head_dim ** 0.5)
-            self.register_buffer("h_matrix", h_mat)
+            self.k_quantizer = TurboQuantProd(
+                self.head_dim, 
+                bits=self.k_bits, 
+                n_rotation_passes=tq_config.n_rotation_passes
+            )
+            self.v_quantizer = TurboQuantValue(
+                self.head_dim, 
+                bits=self.v_bits,
+                group_size=tq_config.v_group_size
+            )
         else:
             self.k_quantizer = None
             self.v_quantizer = None
-
-        # SOTA: RoPE Support (Injected by Patcher)
-        self.rotary_emb = None
-        
+            
+        self.rotary_emb = None # Injected by patcher
 
     def forward(
         self,
@@ -70,79 +75,88 @@ class TurboQuantAttention(nn.Module):
         kv_cache: Optional[TurboQuantKVCache] = None,
         mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        **kwargs
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
-        Input query shape: (batch, seq, dim)
-        """
         batch, seq_q, _ = query.shape
         _, seq_k, _ = key.shape
         
-        # 1. Projections
         q = self.q_proj(query)
         k = self.k_proj(key)
         v = self.v_proj(value)
         
-        # 2. Reshape to head-split format: (batch, n_heads, seq, head_dim)
+        # 2. View/Transpose to (batch, heads, seq, dim) — HF STANDARD
         q = q.view(batch, seq_q, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(batch, seq_k, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch, seq_k, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        # 3. Apply RoPE (Standard HF sequence: AFTER Transpose)
+        # SOTA: Passthrough Support (DecoderLayer passes pre-calculated cos/sin)
+        position_embeddings = kwargs.get("position_embeddings", None)
+        if position_embeddings is not None:
+             # position_embeddings is a Tuple[cos, sin]
+             cos, sin = position_embeddings
+             q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
+        elif self.rotary_emb is not None:
+             # Legacy Fallback: Recalculate
+             cos, sin = self.rotary_emb(v, seq_len=kv_seq_len)
+             q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
         
-        # 3. Apply SOTA RoPE
-        if self.rotary_emb is not None and position_ids is not None:
-            # Note: Many modern HF models use self.rotary_emb(v_proj_output, position_ids) 
-            # to get cos/sin, then apply it to q/k.
-            cos, sin = self.rotary_emb(v, position_ids)
-            
-            # Helper to rotate 2D part
-            def _rotate_half(x):
-                x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
-                return torch.cat((-x2, x1), dim=-1)
-
-            q = (q * cos) + (_rotate_half(q) * sin)
-            k = (k * cos) + (_rotate_half(k) * sin)
-
-        # 4. SOTA: Cascaded WHT for Outlier Suppression (Only if Quantized path)
-        if not self.is_protected:
-            # SOTA Matrix-based WHT: matmul is 100x faster than Iterative Python loop
-            h_mat = self.h_matrix.to(q.device).to(q.dtype)
-            q = torch.matmul(q, h_mat)
-            k = torch.matmul(k, h_mat)
-
+        # 4. SOTA: KV Cache Persistence (Mechanical Hijack Check)
         if kv_cache is not None:
-            # [CRITICAL FIX]: Ghi dữ liệu của token hiện tại vào Paged Pool
-            kv_cache.append(k, v) 
+            # === VÁ LỖI TỬ HUYỆT (Quantizer Sync) ===
+            if (not self.is_protected) and (kv_cache.k_quantizer is None):
+                kv_cache.k_quantizer = self.k_quantizer
+                kv_cache.v_quantizer = self.v_quantizer
+
+            # SOTA: Always use TurboQuant paged attention if cache is present
+            kv_cache.append(k, v)
             
-            # Update quantizers in cache manager
-            kv_cache.k_quantizer = self.k_quantizer
-            kv_cache.v_quantizer = self.v_quantizer
+            # SOTA: The Compass Fix - Update container sequence length at Layer 0
+            if self.layer_idx == 0:
+                if hasattr(self, "_parent_model") and hasattr(self._parent_model, "_tq_cache_override"):
+                    container = self._parent_model._tq_cache_override
+                    container.update_seq_length(q.shape[2])
             
-            # Paged Attention (Architecture-Agnostic Entry Point)
-            k_bits = self.k_quantizer.bits - 1 if self.k_quantizer else 4
-            v_bits = self.v_quantizer.bits if self.v_quantizer else 4
-            qjl_scale = getattr(self.k_quantizer, "qjl_scale", 1.0)
-            sm_scale = 1.0 / (q.shape[-1] ** 0.5)
-            out = paged_turboquant_attention(q, kv_cache, k_bits, v_bits, qjl_scale, sm_scale)
-            
-            # Response handling from kernels/paged_fused.py wrapper
-            # Triton wrapper returns (batch * heads, head_dim) or (batch, heads, seq, head_dim)
-            # Standardize output to (batch, seq, dim)
-            if out.dim() == 2:
-                # out is (batch * heads, head_dim) (case for seq=1)
-                out = out.view(batch, self.num_heads, 1, self.head_dim)
-            
-            # Now it's (batch, heads, seq, head_dim)
-            # Recombine heads
-            out = out.transpose(1, 2).contiguous().view(batch, seq_q, self.dim)
-            return self.o_proj(out), None
-            
+            if seq_q > 1:
+                # 2.1 Prefill Path: Hardware-accelerated SDPA
+                k_full, v_full = k, v
+                if self.num_heads != self.num_kv_heads:
+                    k_full = k_full.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+                    v_full = v_full.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+                
+                is_causal = (seq_q > 1)
+                mask_entry = None if is_causal else mask
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k_full, v_full, attn_mask=mask_entry, is_causal=is_causal
+                )
+            else:
+                # 2.2 Decode Path: Paged Triton Kernel
+                sm_scale = 1.0 / (self.head_dim ** 0.5)
+                out = paged_turboquant_attention(
+                    query=q, 
+                    kv_cache=kv_cache, 
+                    k_bits=self.k_bits,
+                    v_bits=self.v_bits,
+                    qjl_scale=self.tq_config.qjl_scale,
+                    sm_scale=sm_scale,
+                    mask=mask,
+                    quest_threshold=self.tq_config.quest_threshold # <--- DÒNG NÀY CỰC KỲ QUAN TRỌNG
+                )
         else:
-            # Standard Attention (Fallback/Prefill)
+            # 3. Fallback Path: No Cache 
+            k_f, v_f = k, v
             if self.num_heads != self.num_kv_heads:
-                # GQA: Repeat KV heads
-                k = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
-                v = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+                k_f = k_f.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+                v_f = v_f.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
             
-            out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-            # Reshape back to (batch, seq, dim) before projection
-            out = out.transpose(1, 2).contiguous().view(batch, seq_q, self.dim)
-            return self.o_proj(out), None
+            out = torch.nn.functional.scaled_dot_product_attention(
+                q, k_f, v_f, attn_mask=mask, is_causal=(seq_q > 1)
+            )
+            
+        # 4. Final Alignment and Output Projection
+        if out.dim() == 4:
+            out = out.transpose(1, 2).reshape(batch, seq_q, self.dim)
+        else:
+            out = out.reshape(batch, seq_q, self.dim)
+            
+        return self.o_proj(out), None

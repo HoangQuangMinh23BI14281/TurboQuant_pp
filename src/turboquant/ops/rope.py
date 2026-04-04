@@ -4,36 +4,34 @@ from typing import Optional, Tuple
 
 class RotaryPositionalEmbeddings(nn.Module):
     """
-    Rotary Positional Embeddings (RoPE) implementation.
+    Standard Rotary Positional Embeddings (RoPE).
+    Optimized for TurboQuant++ Paged Attention (Hugging Face Interface).
     Reference: https://arxiv.org/abs/2104.09864
     """
 
-    def __init__(self, d: int, base: int = 10_000):
-        """
-        Args:
-            d (int): Dimension of the head (must be even).
-            base (int): Base for the exponential frequency increment.
-        """
+    def __init__(self, d: int, base: int = 1_000_000): # Qwen2.5 Base (SOTA Standard)
         super().__init__()
         self.d = d
         self.base = base
+        # Register buffers for persistence and device handling
+        self.register_buffer("inv_freq", None, persistent=False)
         self.register_buffer("cos_cached", None, persistent=False)
         self.register_buffer("sin_cached", None, persistent=False)
 
     def _build_cache(self, seq_len: int, device: torch.device, dtype: torch.dtype):
         """
-        Precomputes the cos and sin caches for a given sequence length.
-        SOTA Layout: (1, 1, seq_len, d) for Broadcasting with (B, H, S, D)
+        Dynamically builds the cosine and sine caches.
         """
-        if self.cos_cached is not None and seq_len <= self.cos_cached.shape[2]:
-            return
+        if self.cos_cached is not None and self.cos_cached.shape[2] >= seq_len:
+            if self.cos_cached.device == device and self.cos_cached.dtype == dtype:
+                return
 
         inv_freq = 1.0 / (self.base ** (torch.arange(0, self.d, 2, device=device).float() / self.d))
         t = torch.arange(seq_len, device=device).type_as(inv_freq)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
         
-        # SOTA: (1, 1, seq_len, d)
+        # SOTA Layout: (1, 1, seq_len, d)
         self.cos_cached = emb.cos()[None, None, :, :].to(dtype)
         self.sin_cached = emb.sin()[None, None, :, :].to(dtype)
 
@@ -46,22 +44,41 @@ class RotaryPositionalEmbeddings(nn.Module):
         x2 = x[..., self.d // 2 :]
         return torch.cat((-x2, x1), dim=-1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, position_ids: Optional[torch.Tensor] = None):
         """
-        Applies RoPE to the input tensor.
-        SOTA Architecture Layout: (batch, num_heads, seq_len, d_head)
+        x: (batch, heads, seq, dim)
+        position_ids: (batch, seq) - used for generative indexing
         """
-        seq_len = x.shape[2] # Corrected dimensionality probe
-        self._build_cache(seq_len, x.device, x.dtype)
+        batch, heads, seq_len, dim = x.shape
         
-        # BROADCASTING: self.cos_cached is (1, 1, seq_len, d)
-        # x is (batch, heads, seq_len, d)
-        return (x * self.cos_cached[:, :, :seq_len, :]) + (self._rotate_half(x) * self.sin_cached[:, :, :seq_len, :])
+        # 1. Grow Cache if needed
+        max_pos = seq_len
+        if position_ids is not None:
+             max_pos = position_ids.max().item() + 1
+             
+        self._build_cache(max_pos, x.device, x.dtype)
+        
+        # 2. Select Cos/Sin based on position_ids or seq_len
+        if position_ids is not None:
+             # Ensure position_ids are on the correct device
+             pos_ids = position_ids.long().to(x.device)
+             
+             # Standard HF/Qwen RoPE selection:
+             # cos_cached is (1, 1, max_pos, d)
+             # Indexing into (max_pos, d) first -> (batch, seq, d)
+             # Then unsqueeze(1) -> (batch, 1, seq, d) for broadcasting over heads
+             cos = self.cos_cached.squeeze(0).squeeze(0)[pos_ids].unsqueeze(1)
+             sin = self.sin_cached.squeeze(0).squeeze(0)[pos_ids].unsqueeze(1)
+        else:
+             cos = self.cos_cached[:, :, :seq_len, :]
+             sin = self.sin_cached[:, :, :seq_len, :]
+             
+        # Apply RoPE (batch, heads, seq, d)
+        return (x * cos) + (self._rotate_half(x) * sin)
 
 def apply_rope(q: torch.Tensor, k: torch.Tensor, base: int = 10_000) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Functional interface to apply RoPE to Query and Key tensors.
-    Assumes shape (seq_len, batch, num_heads, d_head).
     """
     d_head = q.shape[-1]
     rope_module = RotaryPositionalEmbeddings(d_head, base=base).to(q.device, q.dtype)

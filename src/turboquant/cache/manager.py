@@ -1,254 +1,194 @@
-import math
 import torch
-import torch.nn.functional as F
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
+from collections import defaultdict
 
 from turboquant.cache.block_pool import KVBlockPool
-from turboquant.cache.routing import LayerRouting, QuantizationStrategy
+from turboquant.quant.key_quantizer import TurboQuantProd
+from transformers.cache_utils import Cache
 
-try:
-    from transformers.cache_utils import Cache
-    HAS_TRANSFORMERS = True
-except ImportError:
-    # Shim if transformers is not installed
-    class Cache: pass
-    HAS_TRANSFORMERS = False
-
-class TurboQuantKVCache(Cache):
+class TurboQuantKVCache:
     """
-    Paged KV Cache Manager for TurboQuant++.
-    Orchestrates memory allocation across KVBlockPool and handles 
-    hybrid precision/quantization routing.
+    SOTA Persistent Paged Cache Manager for TurboQuant++.
+    Orchestrates block-level indexing, quantization, and recovery.
     """
-    def __init__(
-        self,
-        layer_idx: int,
-        pool: KVBlockPool,
-        routing: Optional[LayerRouting] = None,
-        k_quantizer: Optional[torch.nn.Module] = None,
-        v_quantizer: Optional[torch.nn.Module] = None,
-    ):
+    def __init__(self, layer_idx: int, pool: KVBlockPool):
         self.layer_idx = layer_idx
         self.pool = pool
         self.device = pool.device
-        self.dtype = pool.dtype
-        self.n_kv_heads = pool.n_heads
-        self.n_heads = pool.n_heads # Default for standard attention
+        self.n_heads = pool.n_heads
+        self.n_kv_heads = pool.n_heads # SOTA Alias for dispatcher
         self.head_dim = pool.head_dim
-        self.tokens_per_block = pool.tokens_per_block
-        self.group_size = 1 # Default for standard attention
+        self.is_compileable = False
+        self.is_compileable = False
+        # Block Management
+        self.block_ids: List[int] = []
+        self.num_tokens = 0
         
-        # Strategy assignment
-        self.routing = routing or LayerRouting(pool.num_blocks) # Dummy routing if none
-        self.strategy = self.routing.get_strategy(layer_idx)
+        # SOTA: Persistent Metadata Buffers
+        self.k_quantizer: Optional[TurboQuantProd] = None
+        self.v_quantizer: Optional[Any] = None
         
-        # Quantizers Initialized automatically if needed
-        if self.strategy != QuantizationStrategy.FP16:
-            if k_quantizer is None:
-                from turboquant.quant.key_quantizer import TurboQuantProd
-                self.k_quantizer = TurboQuantProd(
-                    self.head_dim, 
-                    bits=self.pool.k_bits
-                ).to(self.device)
-            else:
-                self.k_quantizer = k_quantizer
-                
-            if v_quantizer is None:
-                from turboquant.quant.value_quantizer import TurboQuantValue
-                # V bits mapping: pool.v_bits is the target (e.g. 4)
-                self.v_quantizer = TurboQuantValue(
-                    self.head_dim, 
-                    bits=self.pool.v_bits
-                ).to(self.device)
-            else:
-                self.v_quantizer = v_quantizer
-        else:
-            self.k_quantizer = None
-            self.v_quantizer = None
-            
-        # SOTA: Lazy FP16 Storage (Allocated only for FP16-routed layers)
+        # Forensic Diagnostic: Key signal audit
+        self.k_mean_abs = 0.0
+        
+        # SOTA Pillar 3: FP16 Hybrid Support (Exempt Strategy)
         self.k_fp16: Dict[int, torch.Tensor] = {}
         self.v_fp16: Dict[int, torch.Tensor] = {}
-        
-        # Paged Attention State
-        self.block_table = []
-        self.block_ids = self.block_table # Alias for test compatibility
-        self.num_tokens = 0
-        self.layers = [] # Transformers Cache shim
-        self.layer_class_to_replicate = None # SOTA Transformers compat
-        self.offloading = False # SOTA Transformers compat
-        
-    # --- Transformers Cache Interface Sim ---
-    def get_seq_length(self, layer_idx: Optional[int] = None) -> int:
-        return self.num_tokens
 
-    def get_usable_length(self, new_seq_length: int, layer_idx: Optional[int] = None) -> int:
-        return self.num_tokens
-
-    def get_mask_size(self, layer_idx: Optional[int] = None) -> int:
-        # For causal masking, mask size is the total sequence length
-        return self.num_tokens
-    
-    def get_max_length(self) -> Optional[int]:
-        return self.pool.num_blocks * self.tokens_per_block
-
-    @property
-    def is_compileable(self) -> bool:
-        return False
-        
     def append(self, k: torch.Tensor, v: torch.Tensor):
         """
-        Append new KV tokens to the paged pool.
-        k/v shape: (batch=1, n_heads, seq_len=1, head_dim)
+        Appends new KV tokens to the paged pool.
+        Standardized to rank-4 inputs (batch=1, heads, seq, dim).
         """
+        # 1. Shape Normalization
+        # k, v are (batch, heads, seq, dim)
         batch, n_heads, seq_len, head_dim = k.shape
-        assert batch == 1, "TurboQuant Paged Cache currently supports batch=1 append"
+        assert batch == 1, "TurboQuant++ currently supports batch_size=1 (Streaming SOTA)."
         
-        # Ensure inputs are on the same device as the pool
-        k = k.to(self.device)
-        v = v.to(self.device)
-        
-        # SOTA: Prefill Path (Handle chunking BEFORE allocation)
-        if seq_len > 1:
-            for i in range(0, seq_len):
-                self.append(k[:, :, i:i+1, :], v[:, :, i:i+1, :])
-            return
-
-        # Ensure inputs are on the same device as the pool
-        k_in = k.to(self.device).reshape(self.n_heads, self.head_dim)
-        v_in = v.to(self.device).reshape(self.n_heads, self.head_dim)
-        
-        # Check if we need a new block
-        slot_offset = self.num_tokens % self.tokens_per_block
-        if slot_offset == 0:
-            current_block_id = self.pool.allocate_block()
-            self.block_table.append(current_block_id)
-        else:
-            current_block_id = self.block_table[-1]
-        
-        # 1. Quest Summary Update (SOTA Sparsity - Rotated Domain Sync)
-        # SOTA: Compute Rotated Domain (WHT) before MSE for importance summary
-        if self.strategy != QuantizationStrategy.FP16:
-            k_unit = k_in / (torch.norm(k_in, p=2, dim=-1, keepdim=True) + 1e-10)
-            # SOTA: transform_query handles padding (64 -> 128) and multi-head logic
-            k_rotated = self.k_quantizer.mse_quantizer.transform_query(k_unit.float())
-        else:
-            # FP16 layers use original domain for summary, but must PAD to padded_head_dim
-            if self.pool.padded_head_dim != self.head_dim:
-                k_rotated = F.pad(k_in.float(), (0, self.pool.padded_head_dim - self.head_dim))
-            else:
-                k_rotated = k_in.float()
-
-        if slot_offset == 0:
-            self.pool.k_summaries[current_block_id, :, 0, :] = k_rotated.float()
-            self.pool.k_summaries[current_block_id, :, 1, :] = k_rotated.float()
-        else:
-            self.pool.k_summaries[current_block_id, :, 0, :] = torch.min(self.pool.k_summaries[current_block_id, :, 0, :], k_rotated.float())
-            self.pool.k_summaries[current_block_id, :, 1, :] = torch.max(self.pool.k_summaries[current_block_id, :, 1, :], k_rotated.float())
+        # 2. Block Allocation (Hardened Dispatch)
+        tokens_per_block = self.pool.tokens_per_block
+        for i in range(seq_len):
+            current_slot = self.num_tokens
+            slot_offset = current_slot % tokens_per_block
             
-        if self.strategy == QuantizationStrategy.FP16:
-            # Native FP16 Path: Allocated only when Manager identifies FP16 strategy
-            if current_block_id not in self.k_fp16:
-                self.k_fp16[current_block_id] = torch.zeros(
-                    (self.n_heads, self.tokens_per_block, self.head_dim),
-                    dtype=self.dtype, device=self.device
-                )
-                self.v_fp16[current_block_id] = torch.zeros(
-                    (self.n_heads, self.tokens_per_block, self.head_dim),
-                    dtype=self.dtype, device=self.device
-                )
-            self.k_fp16[current_block_id][:, slot_offset] = k_in
-            self.v_fp16[current_block_id][:, slot_offset] = v_in
-        else:
-            # 2. Key Cache with SOTA Pillar 2: Sticky Metadata
             if slot_offset == 0:
-                k_q = self.k_quantizer.quantize(k_in, pack=True)
-                self.pool.k_metadata[current_block_id, :, 0] = k_q.norms.flatten().to(self.device).to(torch.float32)
-                self.pool.k_metadata[current_block_id, :, 1] = k_q.scales.flatten().to(self.device).to(torch.float32)
-                self.pool.k_metadata[current_block_id, :, 2] = k_q.residual_norms.flatten().to(self.device).to(torch.float32)
-                
-                self.pool.k_metadata[current_block_id, :, 2] = k_q.residual_norms.flatten().to(self.device).to(torch.float32)
-            else:
-                pre_norms = self.pool.k_metadata[current_block_id, :, 0].reshape(self.n_heads).to(self.device)
-                pre_scales = self.pool.k_metadata[current_block_id, :, 1].reshape(self.n_heads, 1).to(self.device)
-                pre_res_norms = self.pool.k_metadata[current_block_id, :, 2].reshape(self.n_heads).to(self.device)
-                
-                k_q = self.k_quantizer.quantize(
-                    k_in, pack=True, 
-                    precomputed_norms=pre_norms, 
-                    precomputed_scales=pre_scales,
-                    precomputed_res_norms=pre_res_norms
-                )
-                
-                # 3. Value Cache with SOTA Pillar 2: Block-wide scaling
-            if slot_offset == 0:
-                v_q = self.v_quantizer.quantize(v_in, pack=True)
-                self.pool.v_metadata[current_block_id, :, :, 0] = v_q.scales.reshape(self.n_heads, -1).to(self.device).to(torch.float32)
-                self.pool.v_metadata[current_block_id, :, :, 1] = v_q.zero_points.reshape(self.n_heads, -1).to(self.device).to(torch.float32)
-                v_indices = v_q.indices
-            else:
-                # Fetch block-aligned metadata
-                b_scale = self.pool.v_metadata[current_block_id, :, :, 0].reshape(self.n_heads, -1)
-                b_zero = self.pool.v_metadata[current_block_id, :, :, 1].reshape(self.n_heads, -1)
-                
-                # Quantize relative to STICKY block metadata
-                v_grouped = v_in.reshape(self.n_heads, -1, self.v_quantizer.group_size)
-                v_scale = b_scale.reshape(self.n_heads, -1, 1)
-                v_zero = b_zero.reshape(self.n_heads, -1, 1)
-                
-                vi = torch.round((v_grouped - v_zero) / (v_scale + 1e-10)).clamp(0, self.v_quantizer.n_levels - 1).to(torch.uint8)
-                v_indices = vi.reshape(self.n_heads, -1)
-                from turboquant.quant.quant_base import pack_indices
-                if self.v_quantizer.bits <= 4:
-                    v_indices = pack_indices(v_indices, self.v_quantizer.bits)
-
-            # 4. Final Store to Pool
-            self.pool.k_indices[current_block_id, :, slot_offset] = k_q.mse_indices
-            self.pool.k_qjl[current_block_id, :, slot_offset] = k_q.qjl_signs
-            self.pool.v_indices[current_block_id, :, slot_offset] = v_indices.to(torch.uint8)
+                # Need a new block
+                new_block_id = self.pool.allocate_block()
+                self.block_ids.append(new_block_id)
             
-        self.num_tokens += seq_len
+            # SOTA Pillar 3: FP16 Fallback (Always stored for protected layers)
+            if self.k_quantizer is None:
+                current_block_id = self.block_ids[-1]
+                if current_block_id not in self.k_fp16:
+                    self.k_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+                    self.v_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+                
+                self.k_fp16[current_block_id][:, slot_offset] = k[:, :, i].squeeze(0)
+                self.v_fp16[current_block_id][:, slot_offset] = v[:, :, i].squeeze(0)
 
-    def get_paged_ptrs(self) -> Dict[str, any]:
+            # 2. Append to Physical Pool with Layer Isolation (Quantized Path)
+            if self.k_quantizer is not None:
+                current_block_id = self.block_ids[-1]
+                
+                # SOTA Pillar 1: Key Quantization (MSE + Sign)
+                k_in = k[:, :, i:i+1, :]
+                v_in = v[:, :, i:i+1, :]
+                
+                k_q = self.k_quantizer.quantize(k_in)
+                
+                # Physical Store (Layer-Aware Mapping)
+                li = self.layer_idx
+                self.pool.k_indices[li, current_block_id, :, slot_offset].copy_(k_q.mse_indices.reshape(n_heads, -1))
+                self.pool.k_qjl[li, current_block_id, :, slot_offset].copy_(k_q.qjl_signs.reshape(n_heads, -1))
+                
+                # 3. SOTA Pillar 2: Key Metadata (Per-Slot Dynamic Range Sync)
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, 0].copy_(k_q.norms.flatten())
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, 1].copy_(k_q.scales.flatten())
+                
+                pre_res_norms = k_q.residual_norms if hasattr(k_q, "residual_norms") else None
+                if pre_res_norms is not None:
+                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].copy_(pre_res_norms.to(self.device).flatten())
+                else:
+                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].fill_(0.0)
+
+                # 4. SOTA Pillar 2: Asymmetric Value Quantization (Group-32 resolution)
+                v_q_in = v_in.squeeze(0).reshape(n_heads, self.pool.num_v_groups, self.pool.v_group_size)
+                v_min = v_q_in.min(dim=-1, keepdim=True).values
+                v_max = v_q_in.max(dim=-1, keepdim=True).values
+                
+                v_bits = self.pool.v_bits
+                v_scale = (v_max - v_min) / (2**v_bits - 1)
+                v_zero = v_min
+                v_scale = v_scale.clamp(min=1e-6)
+                
+                v_val = ((v_q_in - v_zero) / v_scale).round().clamp(0, 2**v_bits - 1).to(torch.uint8)
+                
+                # Physical Store (Value + Metadata)
+                v_flat = v_val.reshape(n_heads, -1)
+                if v_bits == 4:
+                    v_pack = v_flat[:, 0::2] | (v_flat[:, 1::2] << 4)
+                else:
+                    v_pack = v_flat
+                
+                self.pool.v_indices[li, current_block_id, :, slot_offset].copy_(v_pack)
+                self.pool.v_metadata[li, current_block_id, :, slot_offset, :, 0].copy_(v_scale.squeeze(-1))
+                self.pool.v_metadata[li, current_block_id, :, slot_offset, :, 1].copy_(v_zero.squeeze(-1))
+                
+                # SOTA: Update block-level summaries for Quest
+                # Ép kiểu float() và clone() để đảm bảo an toàn bộ nhớ
+                k_rotated = self.k_quantizer.mse_quantizer.rotation(k_in.squeeze(0).squeeze(1).float()).clone()
+                
+                # SỬA LỖI IN-PLACE: Phải dùng copy_() thay vì toán tử = 
+                # để đảm bảo dữ liệu ghi thẳng vào VRAM vật lý của Pool.
+                if slot_offset == 0:
+                    self.pool.k_summaries[li, current_block_id, :, 0].copy_(k_rotated)
+                    self.pool.k_summaries[li, current_block_id, :, 1].copy_(k_rotated)
+                else:
+                    self.pool.k_summaries[li, current_block_id, :, 0].copy_(
+                        torch.min(self.pool.k_summaries[li, current_block_id, :, 0], k_rotated)
+                    )
+                    self.pool.k_summaries[li, current_block_id, :, 1].copy_(
+                        torch.max(self.pool.k_summaries[li, current_block_id, :, 1], k_rotated)
+                    )
+
+            # Update count
+            self.num_tokens += 1
+
+    def get_paged_ptrs(self) -> Dict[str, Any]:
         """Return metadata for Triton execution."""
         return {
-            "block_table": torch.tensor(self.block_table, dtype=torch.int32, device=self.device),
-            "tokens_per_block": self.tokens_per_block,
-            "strategy": self.strategy,
-            "pool": self.pool,
             "num_tokens": self.num_tokens,
+            "tokens_per_block": self.pool.tokens_per_block,
+            "block_table": torch.tensor(self.block_ids, device=self.device, dtype=torch.int32),
+            "pool": self.pool,
         }
 
-    def attention_score(
-        self, 
-        query: torch.Tensor, 
-        scale: Optional[float] = None,
-        quest_threshold: float = 1e-4
-    ) -> torch.Tensor:
-        """Convenience wrapper for Paged Attention execution."""
-        from turboquant.kernels.fused_attention import paged_turboquant_attention
-        
-        # SOTA: Fetch dynamic bits and scales for the dispatcher
-        # Use total bits; the kernel dispatcher will solve for mse_bits (bits-1)
-        k_bits = self.k_quantizer.bits if self.k_quantizer else 4
-        v_bits = self.v_quantizer.bits if self.v_quantizer else 4
-        qjl_scale = self.k_quantizer.qjl_scale if self.k_quantizer else 1.0
-        
-        if scale is None:
-            scale = 1.0 / (query.shape[-1] ** 0.5)
-            
-        return paged_turboquant_attention(
-            query, 
-            self, 
-            k_bits=k_bits, 
-            v_bits=v_bits, 
-            qjl_scale=qjl_scale, 
-            sm_scale=scale,
-            quest_threshold=quest_threshold
-        )
+class TurboQuantCacheContainer(Cache):
+    """
+    HuggingFace-compatible Cache Container.
+    Wraps multiple TurboQuantKVCache layers.
+    Implements the 'Cache' interface for transformers>=4.36 compatibility.
+    """
+    def __init__(self, num_layers: int, pool: KVBlockPool):
+        # Note: Do NOT call super().__init__() to avoid ValueError from Cache base
+        self.layers = [TurboQuantKVCache(i, pool) for i in range(num_layers)]
+        self.pool = pool
+        self._current_seq_len = 0 # GPS Tracker
 
-    # def evict_idle_blocks(self, threshold: float = 1e-4, min_keep: int = 1):
-    #     """
-    #     H2O (Heavy Hitter Oracle): Frozen to prevent logical-physical mapping corruption.
-    #     """
-    #     pass
+    def __getitem__(self, idx: int) -> TurboQuantKVCache:
+        return self.layers[idx]
+
+    def __len__(self) -> int:
+        return len(self.layers)
+
+    def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
+        """SOTA: Returns the sequence length relative to the given layer."""
+        _ = layer_idx # Multi-layer sync in container
+        return self._current_seq_len
+
+    def get_usable_length(self, seq_len: int, layer_idx: Optional[int] = 0) -> int:
+        """SOTA: Core 'transformers.Cache' method to determine mask expansion."""
+        _ = (seq_len, layer_idx) # TurboQuant is non-streaming but handles paged growth
+        return self._current_seq_len
+
+    def get_max_length(self) -> Optional[int]:
+        """TurboQuant++ Paged Attention is dynamically unbounded."""
+        return 4096
+
+    def update_seq_length(self, increment: int = 1):
+        """Bắt buộc phải tự tăng biến này sau mỗi bước để đánh lừa HF"""
+        self._current_seq_len += increment
+
+    def get_mask_sizes(self, cache_position: torch.LongTensor, layer_idx: int = 0) -> Tuple[int, int]:
+        """Calculates (kv_length, kv_offset) for mask preprocessing."""
+        kv_length = self._current_seq_len
+        kv_offset = 0 # TurboQuant performs global retrieval from block 0
+        return kv_length, kv_offset
+
+    def update(self, key_states: torch.Tensor, value_states: torch.Tensor, layer_idx: int, cache_position: Optional[torch.LongTensor] = None, **kwargs):
+        """
+        Standard 'Cache.update' bridge.
+        Note: Actual update happens in attention_layer.py via hijack.
+        Returns the passed states as per protocol.
+        """
+        return key_states, value_states

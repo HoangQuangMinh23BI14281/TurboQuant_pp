@@ -10,22 +10,24 @@ from ..ops.rotation import TurboQuantRotation
 from ..ops.wht import fwht, ifwht
 from ..ops.sign_array import generate_sign_array, apply_sign_array
 
+from ..cache.routing import QuantizationStrategy
+
 class TurboQuantMSE(nn.Module):
     """
     TurboQuant MSE-optimal quantizer (Algorithm 1) for K or V.
     Standardized to 128 block size with cascaded SRHT.
     """
-    def __init__(self, dim: int, bits: int = 8, n_rotation_passes: int = 2):
+    def __init__(self, dim: int, bits: int = 8, n_rotation_passes: int = 1):
         super().__init__()
         self.dim = dim
         self.bits = bits
         self.n_levels = 2 ** bits
         self.n_rotation_passes = n_rotation_passes
+        self.strategy = QuantizationStrategy.TURBO_MSE
 
-        bs = 128
-        while bs < dim:
-            bs *= 2
-        self.block_size = bs
+        # SOTA: Auto-calculate power-of-2 block size nearest to dim
+        bs = int(2 ** math.ceil(math.log2(dim)))
+        self.block_size = max(bs, 1)
         self.padded = (self.block_size != self.dim)
         self.rotation = TurboQuantRotation(self.block_size, n_passes=n_rotation_passes, pattern='tbq')
 
@@ -143,7 +145,7 @@ class TurboQuantProd(nn.Module):
     TurboQuant inner-product-optimal quantizer (Algorithm 2) for K.
     Version 1.1.0: "Direct Sign" Optimization (Unprojected Residual)
     """
-    def __init__(self, dim: int, bits: int = 8, n_rotation_passes: int = 2):
+    def __init__(self, dim: int, bits: int = 8, n_rotation_passes: int = 1):
         super().__init__()
         assert bits >= 2
         self.dim = dim
@@ -151,6 +153,7 @@ class TurboQuantProd(nn.Module):
         self.mse_bits = bits - 1
         self.mse_quantizer = TurboQuantMSE(dim, self.mse_bits, n_rotation_passes)
         self.block_size = self.mse_quantizer.block_size
+        self.strategy = QuantizationStrategy.TURBO_PROD
 
         # SOTA V1.1.0: Direct Sign (No qjl_signs buffer needed)
         # Scale for Normal distribution: sqrt(2/pi) / sqrt(D)

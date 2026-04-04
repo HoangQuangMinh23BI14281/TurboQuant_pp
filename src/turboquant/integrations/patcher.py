@@ -1,55 +1,48 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Any, Type, Tuple
-import logging
+from typing import Optional, Tuple, Any
+from transformers.cache_utils import Cache
 
-from turboquant.layers.attention_layer import TurboQuantAttention
 from turboquant.layers.config import TurboQuantConfig
-from turboquant.cache.manager import TurboQuantKVCache
+from turboquant.layers.attention_layer import TurboQuantAttention
 
-logger = logging.getLogger(__name__)
-
-def patch_hf_model(model: nn.Module, tq_config: Optional[TurboQuantConfig] = None):
+def patch_hf_model(model: nn.Module, tq_config: TurboQuantConfig) -> nn.Module:
     """
-    Surgically replace HuggingFace Attention layers with TurboQuantAttention.
-    Supported architectures: LlamaForCausalLM, Qwen2ForCausalLM, MistralForCausalLM.
+    Surgical Monkey-Patching for HuggingFace Transformers.
+    Replaces standard Attention layers with TurboQuant++ Paged Attention.
     """
-    if tq_config is None:
-        tq_config = TurboQuantConfig() # Default 4-bit SOTA
+    # 1. Identify Attention Layers to Patch
+    if not hasattr(model, "model") or not hasattr(model.model, "layers"):
+        print("WARNING: Could not find model.layers. Skipping patching.")
+        return model
         
-    # 1. Identify Attention Modules
-    # We look for common HF Attention class names
-    target_classes = ("LlamaAttention", "Qwen2Attention", "MistralAttention")
-    
-    # Track replaced layers
+    total_layers = len(model.model.layers)
+    print(f"DEBUG: Starting patch on {total_layers} layers...")
     replaced_count = 0
-    total_layers = 0
-    
-    # Calculate total layers first (for strategy mapping)
-    layer_map = {}
-    for name, module in model.named_modules():
-        if any(cls in str(type(module)) for cls in target_classes):
-             total_layers += 1
-             layer_map[total_layers - 1] = module
-
-    logger.info(f"Detected {total_layers} attention layers for patching.")
-
-    # 2. Sequential Replacement
     current_idx = 0
-    for name, module in model.named_modules():
-        if any(cls in str(type(module)) for cls in target_classes):
-            # SOTA Pillar 4: Boundary Layer Protection
-            # Skip first and last 2 layers (High importance for vocabulary/decisions)
-            if current_idx < 2 or current_idx >= total_layers - 2:
-                logger.info(f"Skipping Boundary Layer {current_idx} ({name}) - Running in Native FP16")
-                current_idx += 1
-                continue
+    
+    for layer in model.model.layers:
+        if hasattr(layer, "self_attn"):
+            print(f"DEBUG: Patching Layer {current_idx}...")
+            old_attn = layer.self_attn
             
-            # Create our SOTA layer
-            dim = getattr(module, "hidden_size", model.config.hidden_size)
-            num_heads = getattr(module, "num_heads", model.config.num_attention_heads)
-            num_kv_heads = getattr(module, "num_key_value_heads", getattr(model.config, "num_key_value_heads", num_heads))
-
+            # Extract standard architectural params
+            dim = model.config.hidden_size
+            num_heads = model.config.num_attention_heads
+            num_kv_heads = getattr(model.config, "num_key_value_heads", num_heads)
+            
+            # SOTA: Detect Biases & Shapes
+            q_shape = old_attn.q_proj.weight.shape
+            k_shape = old_attn.k_proj.weight.shape
+            v_shape = old_attn.v_proj.weight.shape
+            q_bias = old_attn.q_proj.bias is not None
+            k_bias = old_attn.k_proj.bias is not None
+            v_bias = old_attn.v_proj.bias is not None
+            o_bias = old_attn.o_proj.bias is not None
+            
+            print(f"DEBUG: Layer {current_idx} | Q: {q_shape} | K: {k_shape} | V: {v_shape}", flush=True)
+            
+            # Create our TurboQuant Attention Layer
             new_layer = TurboQuantAttention(
                 tq_config=tq_config,
                 layer_idx=current_idx,
@@ -57,35 +50,41 @@ def patch_hf_model(model: nn.Module, tq_config: Optional[TurboQuantConfig] = Non
                 dim=dim,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
-            ).to(module.q_proj.weight.device).to(module.q_proj.weight.dtype)
+                q_bias=q_bias,
+                k_bias=k_bias,
+                v_bias=v_bias,
+                o_bias=o_bias
+            ).to(old_attn.q_proj.weight.device).to(old_attn.q_proj.weight.dtype)
             
-            # SOTA: Inject HF Model Config for ROPE and other logic compatibility
-            new_layer.config = model.config
+            # Transfer Weights from Old to New
+            new_layer.q_proj.weight.data.copy_(old_attn.q_proj.weight.data)
+            new_layer.k_proj.weight.data.copy_(old_attn.k_proj.weight.data)
+            new_layer.v_proj.weight.data.copy_(old_attn.v_proj.weight.data)
+            new_layer.o_proj.weight.data.copy_(old_attn.o_proj.weight.data)
             
-            # Transfer ROPE
-            if hasattr(module, "rotary_emb"):
-                new_layer.rotary_emb = module.rotary_emb
+            # Transfer Biases if they exist
+            if q_bias: new_layer.q_proj.bias.data.copy_(old_attn.q_proj.bias.data)
+            if k_bias: new_layer.k_proj.bias.data.copy_(old_attn.k_proj.bias.data)
+            if v_bias: new_layer.v_proj.bias.data.copy_(old_attn.v_proj.bias.data)
+            if o_bias: new_layer.o_proj.bias.data.copy_(old_attn.o_proj.bias.data)
             
-            # Transfer Weights
-            new_layer.q_proj.weight.data.copy_(module.q_proj.weight.data)
-            new_layer.k_proj.weight.data.copy_(module.k_proj.weight.data)
-            new_layer.v_proj.weight.data.copy_(module.v_proj.weight.data)
-            new_layer.o_proj.weight.data.copy_(module.o_proj.weight.data)
+            # Inject RoPE
+            if hasattr(old_attn, "rotary_emb"):
+                new_layer.rotary_emb = old_attn.rotary_emb
             
-            # Replace in Parent
-            parent_name = ".".join(name.split(".")[:-1])
-            attr_name = name.split(".")[-1]
-            parent = model.get_submodule(parent_name)
-            setattr(parent, attr_name, new_layer)
+            # Swap Modules
+            layer.self_attn = new_layer
+            
+            # SOTA: Bind parent model reference for cache hijack recovery
+            new_layer._parent_model = model
             
             # Inject HF-compatible Forward (The Bridge)
-            # This allows the layer to work with model.forward()
             _wrap_hf_forward(new_layer)
             
             current_idx += 1
             replaced_count += 1
 
-    logger.info(f"Successfully patched {replaced_count} layers into {type(model).__name__}.")
+    print(f"Successfully patched {replaced_count} layers into {type(model).__name__}.")
     return model
 
 def _wrap_hf_forward(layer: TurboQuantAttention):
@@ -102,29 +101,42 @@ def _wrap_hf_forward(layer: TurboQuantAttention):
         past_key_value: Optional[Any] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Any]]:
         
-        # 1. Convert past_key_value to TurboQuantKVCache if necessary
-        # Note: vLLM-style serving will maintain an external cache manager.
-        # Here we bridge to existing DynamicCache or our own.
-        tq_cache = None
-        if isinstance(past_key_value, TurboQuantKVCache):
-            tq_cache = past_key_value
-        
-        # 2. Run SOTA Kernel
-        attn_output, _ = original_forward(
-            query=hidden_states,
-            key=hidden_states,
-            value=hidden_states,
-            kv_cache=tq_cache,
-            mask=attention_mask,
-            position_ids=position_ids
-        )
-        
-        # 3. Handle HF Return Format (Output, AttnProb)
-        # Modern HF (v4.36+) expects 2 values if using Cache object
-        return attn_output, None
+        # 1. Bốc đúng túi Cache XỊN của chúng ta (đã được ghim sẵn vào model)
+        container = getattr(layer._parent_model, "_tq_cache_override", None)
+        actual_kv_cache = container.layers[layer.layer_idx] if container else None
+
+        # 2. Chạy toán học SOTA
+        try:
+            # Note: actual_kv_cache handles all logic internally
+            attn_output, attn_weights = original_forward(
+                query=hidden_states, 
+                key=hidden_states, 
+                value=hidden_states, 
+                kv_cache=actual_kv_cache, 
+                mask=attention_mask, 
+                position_ids=position_ids,
+                **kwargs
+            )
+        except Exception as e:
+            print(f"!!! CRITICAL ERROR in Layer {layer.layer_idx} !!!")
+            import traceback
+            traceback.print_exc()
+            raise e
+            
+        # 3. Nuôi "Ghost Cache" của Hugging Face
+        # Nếu HF truyền DynamicCache vào, ta CHỈ TĂNG BỘ ĐẾM để nó không bị lạc đường.
+        # Tuyệt đối không append tensor vào đây để tiết kiệm 100% VRAM!
+        if past_key_value is not None:
+            # HF DynamicCache uses _seen_tokens (pre 4.40) or get_seq_length() 
+            # We strictly sync _seen_tokens only at Layer 0 (the leader)
+            if hasattr(past_key_value, "_seen_tokens") and layer.layer_idx == 0:
+                past_key_value._seen_tokens += hidden_states.shape[1]
+                
+        # Trả lại ĐÚNG số lượng tham số mà môi trường này mong đợi (output, weights) 
+        # Note: Cache được cập nhật IN-PLACE trong manager, nhưng HF vẫn mong nhận 2 biến này
+        return attn_output, attn_weights
 
     layer.forward = hf_forward

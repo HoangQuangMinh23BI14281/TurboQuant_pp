@@ -18,11 +18,8 @@ def debug_parity():
     k_raw = torch.randn((1, n_heads, seq_len, head_dim), device=device)
     v_raw = torch.randn((1, n_heads, seq_len, head_dim), device=device)
     
-    # 1. Rotate K exactly like in production
-    k_rot = kv_cache.k_quantizer.mse_quantizer.rotation(k_raw.view(-1, head_dim)).view(1, n_heads, seq_len, head_dim)
-    
-    # 2. Append
-    kv_cache.append(k_rot, v_raw)
+    # 1. Append RAW (Manager handles rotation internally)
+    kv_cache.append(k_raw, v_raw)
     
     # 3. Query
     query_raw = torch.randn((1, n_heads, 1, head_dim), device=device)

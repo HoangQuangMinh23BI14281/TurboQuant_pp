@@ -5,6 +5,8 @@ class QuantizationStrategy(Enum):
     FP16 = auto()       # No compression
     INT8 = auto()       # Fallback 8-bit
     TURBO_4BIT = auto() # SOTA 4-bit Dual-LUT (TurboQuant++)
+    TURBO_PROD = auto() # Direct Sign Path (Inner-Product Optimal)
+    TURBO_MSE = auto()  # Centroid-based Path (Algorithm 1)
 
 class LayerRouting:
     """

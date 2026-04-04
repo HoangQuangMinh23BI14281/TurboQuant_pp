@@ -15,12 +15,16 @@ class TurboQuantConfig:
         n_tail_protected: Number of final layers to protect.
         group_size: Quantization group size (default: 128).
     """
-    k_bits: int = 8
-    v_bits: int = 3
+    k_bits: int = 5    # SOTA Default: 4-bit MSE + 1-bit Sign
+    v_bits: int = 8    # SOTA Default: High-fidelity Value
     protect_boundaries: bool = True
     n_head_protected: int = 2
     n_tail_protected: int = 2
     group_size: int = 128
+    v_group_size: int = 32
+    n_rotation_passes: int = 1
+    qjl_scale: float = 0.1 # Calibrated SOTA Scale
+    quest_threshold: float = -1e6 # Default: Disable sparsity for stability
     
     # Advanced routing (Layer-specific overrides)
     layer_overrides: Dict[int, Dict] = field(default_factory=dict)
