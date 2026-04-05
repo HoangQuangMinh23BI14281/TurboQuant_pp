@@ -1,0 +1,744 @@
+============================= test session starts ==============================
+platform linux -- Python 3.9.25, pytest-8.4.2, pluggy-1.6.0 -- /home/minh/projects/turboquant_pp/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/minh/projects/turboquant_pp
+configfile: pyproject.toml
+testpaths: tests
+plugins: anyio-4.12.1
+collecting ... collected 168 items
+
+tests/test_architectural_branching.py::test_fp16_paged_storage_and_gather FAILED [  0%]
+tests/test_architectural_branching.py::test_hybrid_precision_paged_attention FAILED [  1%]
+tests/test_fused_attention.py::test_attention_score_mse_shape[128] PASSED [  1%]
+tests/test_fused_attention.py::test_attention_score_mse_shape[256] PASSED [  2%]
+tests/test_fused_attention.py::test_attention_score_prod_shape[128] PASSED [  2%]
+tests/test_fused_attention.py::test_attention_score_prod_shape[256] PASSED [  3%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[0] PASSED [  4%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[1] PASSED [  4%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[2] PASSED [  5%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[3] PASSED [  5%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[4] PASSED [  6%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[5] PASSED [  7%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[6] PASSED [  7%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[7] PASSED [  8%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[8] PASSED [  8%]
+tests/test_fused_attention.py::test_attention_score_prod_correlation[9] PASSED [  9%]
+tests/test_fused_attention.py::test_attention_non_gaussian PASSED        [ 10%]
+tests/test_fused_attention.py::test_turboquant_attention_output_shape PASSED [ 10%]
+tests/test_fused_attention.py::test_attention_quality_vs_true PASSED     [ 11%]
+tests/test_h2o_eviction.py::test_h2o_importance_accumulation SKIPPED     [ 11%]
+tests/test_h2o_eviction.py::test_h2o_eviction_integrity SKIPPED (H2O...) [ 12%]
+tests/test_hell_fused.py::TestHellFused::test_softmax_stability_hell PASSED [ 13%]
+tests/test_hell_fused.py::TestHellFused::test_long_context_hell PASSED   [ 13%]
+tests/test_hell_fused.py::TestHellFused::test_odd_bit_packing_hell PASSED [ 14%]
+tests/test_hell_fused.py::TestHellFused::test_large_dim_hell PASSED      [ 14%]
+tests/test_hybrid_routing.py::test_boundary_layer_protection PASSED      [ 15%]
+tests/test_hybrid_routing.py::test_hybrid_precision_forward PASSED       [ 16%]
+tests/test_kv_manager.py::test_kv_manager_paged_allocation FAILED        [ 16%]
+tests/test_kv_manager.py::test_kv_manager_metadata_fidelity FAILED       [ 17%]
+tests/test_kv_manager.py::test_kv_manager_boundary_protection FAILED     [ 17%]
+tests/test_lloyd_max.py::test_lloyd_max_range[1] PASSED                  [ 18%]
+tests/test_lloyd_max.py::test_lloyd_max_range[2] PASSED                  [ 19%]
+tests/test_lloyd_max.py::test_lloyd_max_range[3] PASSED                  [ 19%]
+tests/test_lloyd_max.py::test_lloyd_max_range[4] PASSED                  [ 20%]
+tests/test_lloyd_max.py::test_lloyd_max_range[5] PASSED                  [ 20%]
+tests/test_lloyd_max.py::test_lloyd_max_range[6] PASSED                  [ 21%]
+tests/test_lloyd_max.py::test_lloyd_max_range[7] PASSED                  [ 22%]
+tests/test_lloyd_max.py::test_lloyd_max_range[8] PASSED                  [ 22%]
+tests/test_lloyd_max.py::test_lloyd_max_reconstruction_values[2] PASSED  [ 23%]
+tests/test_lloyd_max.py::test_lloyd_max_reconstruction_values[4] PASSED  [ 23%]
+tests/test_lloyd_max.py::test_lloyd_max_monotonicity PASSED              [ 24%]
+tests/test_lloyd_max.py::test_lloyd_max_device_dtype PASSED              [ 25%]
+tests/test_paged_attention.py::TestPagedAttention::test_paged_vs_contiguous_parity[8-3] FAILED [ 25%]
+tests/test_paged_attention.py::TestPagedAttention::test_paged_vs_contiguous_parity[4-4] FAILED [ 26%]
+tests/test_qjl.py::test_qjl_correlation_improvement[3-128] PASSED        [ 26%]
+tests/test_qjl.py::test_qjl_correlation_improvement[3-256] PASSED        [ 27%]
+tests/test_qjl.py::test_qjl_correlation_improvement[4-128] PASSED        [ 27%]
+tests/test_qjl.py::test_qjl_correlation_improvement[4-256] PASSED        [ 28%]
+tests/test_qjl.py::test_qjl_correction_scale PASSED                      [ 29%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-64] PASSED            [ 29%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-128] PASSED           [ 30%]
+tests/test_quantizer.py::test_mse_quantize_basic[4-256] PASSED           [ 30%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-64] PASSED            [ 31%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-128] PASSED           [ 32%]
+tests/test_quantizer.py::test_mse_quantize_basic[8-256] PASSED           [ 32%]
+tests/test_quantizer.py::test_mse_roundtrip[3-64] PASSED                 [ 33%]
+tests/test_quantizer.py::test_mse_roundtrip[3-128] PASSED                [ 33%]
+tests/test_quantizer.py::test_mse_roundtrip[3-256] PASSED                [ 34%]
+tests/test_quantizer.py::test_mse_roundtrip[4-64] PASSED                 [ 35%]
+tests/test_quantizer.py::test_mse_roundtrip[4-128] PASSED                [ 35%]
+tests/test_quantizer.py::test_mse_roundtrip[4-256] PASSED                [ 36%]
+tests/test_quantizer.py::test_prod_quantize_flow[4-128] PASSED           [ 36%]
+tests/test_quantizer.py::test_prod_quantize_packed PASSED                [ 37%]
+tests/test_quantizer.py::test_prod_roundtrip PASSED                      [ 38%]
+tests/test_quantizer.py::test_prod_roundtrip_nonstandard_dim PASSED      [ 38%]
+tests/test_quantizer.py::test_bit_packing_lossless[4] PASSED             [ 39%]
+tests/test_quantizer.py::test_bit_packing_lossless[8] PASSED             [ 39%]
+tests/test_quantizer.py::test_prod_broadcasting PASSED                   [ 40%]
+tests/test_quantizer.py::test_mse_broadcasting PASSED                    [ 41%]
+tests/test_quantizer.py::test_prod_better_than_mse_at_same_total_bits PASSED [ 41%]
+tests/test_quantizer.py::test_bit_perfect_packing[1] PASSED              [ 42%]
+tests/test_quantizer.py::test_bit_perfect_packing[2] PASSED              [ 42%]
+tests/test_quantizer.py::test_bit_perfect_packing[3] PASSED              [ 43%]
+tests/test_quantizer.py::test_bit_perfect_packing[4] PASSED              [ 44%]
+tests/test_quantizer.py::test_bit_perfect_packing[5] PASSED              [ 44%]
+tests/test_quantizer.py::test_bit_perfect_packing[6] PASSED              [ 45%]
+tests/test_quantizer.py::test_bit_perfect_packing[7] PASSED              [ 45%]
+tests/test_quantizer.py::test_bit_perfect_packing[8] PASSED              [ 46%]
+tests/test_quest_sparsity.py::test_quest_summary_consistency FAILED      [ 47%]
+tests/test_quest_sparsity.py::test_quest_skip_logic SKIPPED (Simulat...) [ 47%]
+tests/test_rope.py::test_rope_identity_at_zero[64] PASSED                [ 48%]
+tests/test_rope.py::test_rope_identity_at_zero[128] PASSED               [ 48%]
+tests/test_rope.py::test_rope_identity_at_zero[256] PASSED               [ 49%]
+tests/test_rope.py::test_rope_relative_position[64] PASSED               [ 50%]
+tests/test_rope.py::test_rope_relative_position[128] PASSED              [ 50%]
+tests/test_rope.py::test_rope_relative_position[256] PASSED              [ 51%]
+tests/test_rope.py::test_apply_rope_functional[64] PASSED                [ 51%]
+tests/test_rope.py::test_apply_rope_functional[128] PASSED               [ 52%]
+tests/test_rope.py::test_apply_rope_functional[256] PASSED               [ 52%]
+tests/test_rope.py::test_rope_architecture_alignment[128] PASSED         [ 53%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-64] PASSED   [ 54%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-128] PASSED  [ 54%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-256] PASSED  [ 55%]
+tests/test_rotation.py::test_cascaded_rotation_properties[1-1024] PASSED [ 55%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-64] PASSED   [ 56%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-128] PASSED  [ 57%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-256] PASSED  [ 57%]
+tests/test_rotation.py::test_cascaded_rotation_properties[2-1024] PASSED [ 58%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-64] PASSED   [ 58%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-128] PASSED  [ 59%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-256] PASSED  [ 60%]
+tests/test_rotation.py::test_cascaded_rotation_properties[3-1024] PASSED [ 60%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[1-64] PASSED    [ 61%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[1-128] PASSED   [ 61%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[1-256] PASSED   [ 62%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[2-64] PASSED    [ 63%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[2-128] PASSED   [ 63%]
+tests/test_rotation.py::test_cascaded_rotation_roundtrip[2-256] PASSED   [ 64%]
+tests/test_rotation.py::test_cascaded_independence PASSED                [ 64%]
+tests/test_sign_array.py::test_sign_values_domain[64] PASSED             [ 65%]
+tests/test_sign_array.py::test_sign_values_domain[128] PASSED            [ 66%]
+tests/test_sign_array.py::test_sign_values_domain[256] PASSED            [ 66%]
+tests/test_sign_array.py::test_sign_values_domain[512] PASSED            [ 67%]
+tests/test_sign_array.py::test_deterministic_seed[64] PASSED             [ 67%]
+tests/test_sign_array.py::test_deterministic_seed[128] PASSED            [ 68%]
+tests/test_sign_array.py::test_deterministic_seed[256] PASSED            [ 69%]
+tests/test_sign_array.py::test_sign_inverse[64] PASSED                   [ 69%]
+tests/test_sign_array.py::test_sign_inverse[128] PASSED                  [ 70%]
+tests/test_sign_array.py::test_sign_inverse[256] PASSED                  [ 70%]
+tests/test_sign_array.py::test_llama_presets[256] PASSED                 [ 71%]
+tests/test_sign_array.py::test_apply_sign_broadcasting PASSED            [ 72%]
+tests/test_sota_snr_parity.py::test_dual_lut_snr_gain[3-128] PASSED      [ 72%]
+tests/test_sota_snr_parity.py::test_dual_lut_snr_gain[3-256] PASSED      [ 73%]
+tests/test_sota_snr_parity.py::test_dual_lut_snr_gain[4-128] PASSED      [ 73%]
+tests/test_sota_snr_parity.py::test_dual_lut_snr_gain[4-256] PASSED      [ 74%]
+tests/test_sota_snr_parity.py::test_block_128_compression_audit PASSED   [ 75%]
+tests/test_torture_quant.py::test_outlier_hell_key[4-128] PASSED         [ 75%]
+tests/test_torture_quant.py::test_outlier_hell_key[4-256] PASSED         [ 76%]
+tests/test_torture_quant.py::test_zero_variance_hell_value[64-128] PASSED [ 76%]
+tests/test_torture_quant.py::test_wht_precision_hell PASSED              [ 77%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-128-128-8-1] PASSED [ 77%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-128-128-8-2] PASSED [ 78%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-128-512-8-1] PASSED [ 79%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-128-512-8-2] PASSED [ 79%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-256-128-8-1] PASSED [ 80%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-256-128-8-2] PASSED [ 80%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-256-512-8-1] PASSED [ 81%]
+tests/test_triton_dequant_v.py::test_value_dequant_bit_exact[128-256-512-8-2] PASSED [ 82%]
+tests/test_value_quantizer.py::test_value_quantize_basic[4-64] PASSED    [ 82%]
+tests/test_value_quantizer.py::test_value_quantize_basic[4-128] PASSED   [ 83%]
+tests/test_value_quantizer.py::test_value_quantize_basic[4-256] PASSED   [ 83%]
+tests/test_value_quantizer.py::test_value_quantize_basic[8-64] PASSED    [ 84%]
+tests/test_value_quantizer.py::test_value_quantize_basic[8-128] PASSED   [ 85%]
+tests/test_value_quantizer.py::test_value_quantize_basic[8-256] PASSED   [ 85%]
+tests/test_value_quantizer.py::test_value_group_quantize[32] PASSED      [ 86%]
+tests/test_value_quantizer.py::test_value_group_quantize[64] PASSED      [ 86%]
+tests/test_value_quantizer.py::test_value_extreme_torture_shifted[4] PASSED [ 87%]
+tests/test_value_quantizer.py::test_value_extreme_torture_shifted[8] PASSED [ 88%]
+tests/test_value_quantizer.py::test_value_extreme_torture_spiky PASSED   [ 88%]
+tests/test_value_quantizer.py::test_value_bit_perfect_packing_torture[4] PASSED [ 89%]
+tests/test_value_quantizer.py::test_value_bit_perfect_packing_torture[8] PASSED [ 89%]
+tests/test_value_quantizer.py::test_value_dtype_torture[dtype0] PASSED   [ 90%]
+tests/test_value_quantizer.py::test_value_dtype_torture[dtype1] PASSED   [ 91%]
+tests/test_wht.py::test_orthogonality[64] PASSED                         [ 91%]
+tests/test_wht.py::test_orthogonality[128] PASSED                        [ 92%]
+tests/test_wht.py::test_orthogonality[256] PASSED                        [ 92%]
+tests/test_wht.py::test_orthogonality[512] PASSED                        [ 93%]
+tests/test_wht.py::test_fwht_vs_naive[64] PASSED                         [ 94%]
+tests/test_wht.py::test_fwht_vs_naive[128] PASSED                        [ 94%]
+tests/test_wht.py::test_fwht_vs_naive[256] PASSED                        [ 95%]
+tests/test_wht.py::test_roundtrip[64] PASSED                             [ 95%]
+tests/test_wht.py::test_roundtrip[128] PASSED                            [ 96%]
+tests/test_wht.py::test_roundtrip[256] PASSED                            [ 97%]
+tests/test_wht.py::test_norm_preservation[64] PASSED                     [ 97%]
+tests/test_wht.py::test_norm_preservation[128] PASSED                    [ 98%]
+tests/test_wht.py::test_norm_preservation[256] PASSED                    [ 98%]
+tests/test_wht.py::test_dtype_preservation[dtype0] PASSED                [ 99%]
+tests/test_wht.py::test_dtype_preservation[dtype1] PASSED                [100%]
+
+=================================== FAILURES ===================================
+______________________ test_fp16_paged_storage_and_gather ______________________
+
+    def test_fp16_paged_storage_and_gather():
+        """Verify that FP16 path correctly uses raw buffers and gather logic."""
+        num_blocks = 10
+        tokens_per_block = 16
+        head_dim = 64
+        n_heads = 4
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+        # Signature: num_blocks, head_dim, n_heads, tokens_per_block
+        pool = KVBlockPool(num_blocks=num_blocks, head_dim=head_dim, n_heads=n_heads, tokens_per_block=tokens_per_block, device=device)
+    
+        # Layer 0 is FP16
+        routing = LayerRouting(num_layers=4, exempt_layers=[0])
+        cache = TurboQuantKVCache(layer_idx=0, pool=pool)
+    
+        # Mock data (batch=1, seq_len=1, dimension=256)
+        # Layer 0 is FP16
+        q = torch.randn(1, 1, head_dim * n_heads, device=device, dtype=torch.float16)
+        k = torch.randn(1, 1, head_dim * n_heads, device=device, dtype=torch.float16)
+        v = torch.randn(1, 1, head_dim * n_heads, device=device, dtype=torch.float16)
+    
+        # Simple projection simulate (since we are testing the cache storage, not the layer here)
+        # But for cache.append we need the HEAD SPLIT version
+        k_split = k.view(1, 1, n_heads, head_dim).transpose(1, 2)
+        v_split = v.view(1, 1, n_heads, head_dim).transpose(1, 2)
+    
+        cache.append(k_split, v_split)
+    
+        # Check if stored in fp16 buffer
+>       bid = cache.block_table[0]
+E       AttributeError: 'TurboQuantKVCache' object has no attribute 'block_table'
+
+tests/test_architectural_branching.py:39: AttributeError
+____________________ test_hybrid_precision_paged_attention _____________________
+
+    def test_hybrid_precision_paged_attention():
+        """
+        Test routing between Layer 0 (FP16) and Layer 1 (Quantized).
+        """
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dim, n_heads = 256, 4
+        head_dim = dim // n_heads # 64
+        tokens_per_block = 16
+    
+        config = TurboQuantConfig(n_head_protected=1) # Layer 0 is FP16
+        routing = LayerRouting(num_layers=4, exempt_layers=[0])
+        pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, tokens_per_block=tokens_per_block, device=device)
+    
+        # Layer 0: FP16
+        layer0 = TurboQuantAttention(config, layer_idx=0, total_layers=4, dim=dim, num_heads=n_heads, num_kv_heads=n_heads).to(device).half()
+>       cache0 = TurboQuantKVCache(layer_idx=0, pool=pool, routing=routing)
+E       TypeError: __init__() got an unexpected keyword argument 'routing'
+
+tests/test_architectural_branching.py:59: TypeError
+_______________________ test_kv_manager_paged_allocation _______________________
+
+    def test_kv_manager_paged_allocation():
+        num_layers = 4
+        num_blocks = 10
+        tokens_per_block = 16
+        head_dim = 128
+        n_heads = 8
+    
+        # Signature: num_blocks, head_dim, n_heads, tokens_per_block
+        pool = KVBlockPool(
+            num_blocks=num_blocks,
+            head_dim=head_dim,
+            n_heads=n_heads,
+            tokens_per_block=tokens_per_block
+        )
+    
+        # Init Cache for Layer 1
+        cache = TurboQuantKVCache(
+            layer_idx=1,
+            pool=pool
+        )
+        cache.k_quantizer = TurboQuantProd(head_dim)
+        cache.v_quantizer = TurboQuantValue(head_dim)
+    
+        # 1. Fill exactly one block
+        for i in range(tokens_per_block):
+            k = torch.randn(1, n_heads, 1, head_dim)
+            v = torch.randn(1, n_heads, 1, head_dim)
+>           cache.append(k, v)
+
+tests/test_kv_manager.py:35: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <turboquant.cache.manager.TurboQuantKVCache object at 0x7bf6c3f44670>
+k = tensor([[[[-0.4657, -0.5193,  0.6221,  ..., -0.4508, -0.0026,  0.8442]],
+
+         [[ 1.4117,  0.0821,  0.3857,  ..., ... 1.3663,  ..., -1.0444,  0.7821,  0.9379]],
+
+         [[-1.4755,  0.5604, -0.7131,  ..., -1.3394, -1.3063,  0.9762]]]])
+v = tensor([[[[-1.0461,  0.5675, -1.7087,  ...,  0.6223, -0.5240,  1.0540]],
+
+         [[ 0.8004,  0.0305, -2.3239,  ..., ...-0.8351,  ...,  0.9220,  1.1395, -0.5806]],
+
+         [[ 0.6251, -0.0180, -0.5972,  ..., -0.1295, -0.2942, -0.6381]]]])
+
+    def append(self, k: torch.Tensor, v: torch.Tensor):
+        """
+        Appends new KV tokens to the paged pool.
+        Standardized to rank-4 inputs (batch=1, heads, seq, dim).
+        """
+        # 1. Shape Normalization
+        # k, v are (batch, heads, seq, dim)
+        batch, n_heads, seq_len, head_dim = k.shape
+        assert batch == 1, "TurboQuant++ currently supports batch_size=1 (Streaming SOTA)."
+    
+        # 2. Block Allocation (Hardened Dispatch)
+        tokens_per_block = self.pool.tokens_per_block
+        for i in range(seq_len):
+            current_slot = self.num_tokens
+            slot_offset = current_slot % tokens_per_block
+    
+            if slot_offset == 0:
+                # Need a new block
+                new_block_id = self.pool.allocate_block()
+                self.block_ids.append(new_block_id)
+    
+            # SOTA Pillar 3: FP16 Fallback (Always stored for protected layers)
+            if self.k_quantizer is None:
+                current_block_id = self.block_ids[-1]
+                if current_block_id not in self.k_fp16:
+                    self.k_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+                    self.v_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+    
+                self.k_fp16[current_block_id][:, slot_offset] = k[:, :, i].squeeze(0)
+                self.v_fp16[current_block_id][:, slot_offset] = v[:, :, i].squeeze(0)
+    
+            # 2. Append to Physical Pool with Layer Isolation (Quantized Path)
+            if self.k_quantizer is not None:
+                current_block_id = self.block_ids[-1]
+    
+                # SOTA Pillar 1: Key Quantization (MSE + Sign)
+                k_in = k[:, :, i:i+1, :]
+                v_in = v[:, :, i:i+1, :]
+    
+                k_q = self.k_quantizer.quantize(k_in)
+    
+                # Physical Store (Layer-Aware Mapping)
+                li = self.layer_idx
+                self.pool.k_indices[li, current_block_id, :, slot_offset].copy_(k_q.mse_indices.reshape(n_heads, -1))
+                self.pool.k_qjl[li, current_block_id, :, slot_offset].copy_(k_q.qjl_signs.reshape(n_heads, -1))
+    
+                # 3. SOTA Pillar 2: Key Metadata (Per-Slot Dynamic Range Sync)
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, 0].copy_(k_q.norms.flatten())
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, 1].copy_(k_q.scales.flatten())
+    
+                pre_res_norms = k_q.residual_norms if hasattr(k_q, "residual_norms") else None
+                if pre_res_norms is not None:
+                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].copy_(pre_res_norms.to(self.device).flatten())
+                else:
+                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].fill_(0.0)
+    
+                # 4. SOTA Pillar 2: Asymmetric Value Quantization (Group-32 resolution)
+                v_q_in = v_in.squeeze(0).reshape(n_heads, self.pool.num_v_groups, self.pool.v_group_size)
+                v_min = v_q_in.min(dim=-1, keepdim=True).values
+                v_max = v_q_in.max(dim=-1, keepdim=True).values
+    
+                v_bits = self.pool.v_bits
+                v_scale = (v_max - v_min) / (2**v_bits - 1)
+                v_zero = v_min
+                v_scale = v_scale.clamp(min=1e-6)
+    
+                v_val = ((v_q_in - v_zero) / v_scale).round().clamp(0, 2**v_bits - 1).to(torch.uint8)
+    
+                # Physical Store (Value + Metadata)
+                v_flat = v_val.reshape(n_heads, -1)
+                if v_bits == 4:
+                    v_pack = v_flat[:, 0::2] | (v_flat[:, 1::2] << 4)
+                else:
+                    v_pack = v_flat
+    
+>               self.pool.v_indices[li, current_block_id, :, slot_offset].copy_(v_pack)
+E               RuntimeError: The size of tensor a (64) must match the size of tensor b (128) at non-singleton dimension 1
+
+src/turboquant/cache/manager.py:113: RuntimeError
+______________________ test_kv_manager_metadata_fidelity _______________________
+
+    def test_kv_manager_metadata_fidelity():
+        num_blocks = 10
+        tokens_per_block = 16
+        n_heads = 8
+        head_dim = 256 # 2 groups of Block-128
+    
+        pool = KVBlockPool(
+            num_blocks=num_blocks,
+            head_dim=head_dim,
+            n_heads=n_heads,
+            tokens_per_block=tokens_per_block
+        )
+    
+        cache = TurboQuantKVCache(
+            layer_idx=1,
+            pool=pool
+        )
+        cache.k_quantizer = TurboQuantProd(head_dim)
+        cache.v_quantizer = TurboQuantValue(head_dim)
+    
+        k = torch.randn(1, n_heads, 1, head_dim)
+        v = torch.randn(1, n_heads, 1, head_dim)
+>       cache.append(k, v)
+
+tests/test_kv_manager.py:70: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <turboquant.cache.manager.TurboQuantKVCache object at 0x7bf6c3f76160>
+k = tensor([[[[ 0.4577,  1.4308,  0.0478,  ..., -0.3600, -0.9039,  0.2016]],
+
+         [[-0.1554,  0.0533, -0.8355,  ..., ... 1.6978,  ..., -1.0335, -0.0673, -0.0029]],
+
+         [[-0.2507, -1.1486,  0.7216,  ...,  0.8117,  1.1109,  0.7544]]]])
+v = tensor([[[[ 0.5496,  0.9507, -1.5586,  ..., -1.4229,  0.7508,  0.9503]],
+
+         [[-0.5713, -0.6633, -0.5416,  ..., ... 0.0022,  ...,  0.6978,  0.3312,  0.0495]],
+
+         [[ 1.1860,  0.3738,  0.6511,  ...,  1.8515,  0.6086,  0.5780]]]])
+
+    def append(self, k: torch.Tensor, v: torch.Tensor):
+        """
+        Appends new KV tokens to the paged pool.
+        Standardized to rank-4 inputs (batch=1, heads, seq, dim).
+        """
+        # 1. Shape Normalization
+        # k, v are (batch, heads, seq, dim)
+        batch, n_heads, seq_len, head_dim = k.shape
+        assert batch == 1, "TurboQuant++ currently supports batch_size=1 (Streaming SOTA)."
+    
+        # 2. Block Allocation (Hardened Dispatch)
+        tokens_per_block = self.pool.tokens_per_block
+        for i in range(seq_len):
+            current_slot = self.num_tokens
+            slot_offset = current_slot % tokens_per_block
+    
+            if slot_offset == 0:
+                # Need a new block
+                new_block_id = self.pool.allocate_block()
+                self.block_ids.append(new_block_id)
+    
+            # SOTA Pillar 3: FP16 Fallback (Always stored for protected layers)
+            if self.k_quantizer is None:
+                current_block_id = self.block_ids[-1]
+                if current_block_id not in self.k_fp16:
+                    self.k_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+                    self.v_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+    
+                self.k_fp16[current_block_id][:, slot_offset] = k[:, :, i].squeeze(0)
+                self.v_fp16[current_block_id][:, slot_offset] = v[:, :, i].squeeze(0)
+    
+            # 2. Append to Physical Pool with Layer Isolation (Quantized Path)
+            if self.k_quantizer is not None:
+                current_block_id = self.block_ids[-1]
+    
+                # SOTA Pillar 1: Key Quantization (MSE + Sign)
+                k_in = k[:, :, i:i+1, :]
+                v_in = v[:, :, i:i+1, :]
+    
+                k_q = self.k_quantizer.quantize(k_in)
+    
+                # Physical Store (Layer-Aware Mapping)
+                li = self.layer_idx
+                self.pool.k_indices[li, current_block_id, :, slot_offset].copy_(k_q.mse_indices.reshape(n_heads, -1))
+                self.pool.k_qjl[li, current_block_id, :, slot_offset].copy_(k_q.qjl_signs.reshape(n_heads, -1))
+    
+                # 3. SOTA Pillar 2: Key Metadata (Per-Slot Dynamic Range Sync)
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, 0].copy_(k_q.norms.flatten())
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, 1].copy_(k_q.scales.flatten())
+    
+                pre_res_norms = k_q.residual_norms if hasattr(k_q, "residual_norms") else None
+                if pre_res_norms is not None:
+                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].copy_(pre_res_norms.to(self.device).flatten())
+                else:
+                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].fill_(0.0)
+    
+                # 4. SOTA Pillar 2: Asymmetric Value Quantization (Group-32 resolution)
+                v_q_in = v_in.squeeze(0).reshape(n_heads, self.pool.num_v_groups, self.pool.v_group_size)
+                v_min = v_q_in.min(dim=-1, keepdim=True).values
+                v_max = v_q_in.max(dim=-1, keepdim=True).values
+    
+                v_bits = self.pool.v_bits
+                v_scale = (v_max - v_min) / (2**v_bits - 1)
+                v_zero = v_min
+                v_scale = v_scale.clamp(min=1e-6)
+    
+                v_val = ((v_q_in - v_zero) / v_scale).round().clamp(0, 2**v_bits - 1).to(torch.uint8)
+    
+                # Physical Store (Value + Metadata)
+                v_flat = v_val.reshape(n_heads, -1)
+                if v_bits == 4:
+                    v_pack = v_flat[:, 0::2] | (v_flat[:, 1::2] << 4)
+                else:
+                    v_pack = v_flat
+    
+>               self.pool.v_indices[li, current_block_id, :, slot_offset].copy_(v_pack)
+E               RuntimeError: The size of tensor a (128) must match the size of tensor b (256) at non-singleton dimension 1
+
+src/turboquant/cache/manager.py:113: RuntimeError
+_____________________ test_kv_manager_boundary_protection ______________________
+
+    def test_kv_manager_boundary_protection():
+        """
+        Ensure the manager respects the 'Exempt' routing (no quantization).
+        """
+        from turboquant.cache.routing import LayerRouting, QuantizationStrategy
+    
+        num_blocks = 10
+        tokens_per_block = 16
+        head_dim = 128
+        n_heads = 8
+    
+        pool = KVBlockPool(num_blocks, head_dim, n_heads, tokens_per_block)
+    
+        cache = TurboQuantKVCache(layer_idx=0, pool=pool)
+        cache.is_protected = True # Emulate routing
+    
+        # Append should go to k_fp16 local dictionary, not global pool k_indices
+        k = torch.randn(1, n_heads, 1, head_dim)
+        v = torch.randn(1, n_heads, 1, head_dim)
+        cache.append(k, v)
+    
+>       bid = cache.block_table[0]
+E       AttributeError: 'TurboQuantKVCache' object has no attribute 'block_table'
+
+tests/test_kv_manager.py:113: AttributeError
+___________ TestPagedAttention.test_paged_vs_contiguous_parity[8-3] ____________
+
+self = <tests.test_paged_attention.TestPagedAttention object at 0x7bf6c3fc6d60>
+k_bits = 8, v_bits = 3, seq_len = 200
+
+    @pytest.mark.parametrize("k_bits, v_bits", [(8, 3), (4, 4)])
+    def test_paged_vs_contiguous_parity(self, k_bits, v_bits, seq_len=200):
+        device = "cuda"
+        head_dim = 128
+        n_heads = 4
+        torch.manual_seed(42)
+    
+        pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, k_bits=k_bits, v_bits=v_bits)
+        kv_cache = TurboQuantKVCache(layer_idx=1, pool=pool)
+    
+        from turboquant.quant.key_quantizer import TurboQuantProd
+        from turboquant.quant.value_quantizer import TurboQuantValue
+        kv_cache.k_quantizer = TurboQuantProd(dim=head_dim, n_rotation_passes=2)
+        kv_cache.v_quantizer = TurboQuantValue(dim=head_dim)
+    
+        k_full = torch.randn((1, n_heads, seq_len, head_dim), device=device)
+        v_full = torch.randn((1, n_heads, seq_len, head_dim), device=device)
+>       kv_cache.append(k_full, v_full)
+
+tests/test_paged_attention.py:30: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <turboquant.cache.manager.TurboQuantKVCache object at 0x7bf6c1797190>
+k = tensor([[[[ 0.1940,  2.1614, -0.1721,  ..., -1.2072, -0.2438, -0.6784],
+          [ 0.1973,  0.9782, -0.0287,  ..., -0..., -0.4642,  0.3741],
+          [-1.4709, -0.1485,  0.8009,  ..., -0.6125,  1.5166, -0.8489]]]],
+       device='cuda:0')
+v = tensor([[[[ 0.1391, -0.1082, -0.7174,  ..., -0.1305,  1.1959, -0.6755],
+          [-0.5086,  0.9697,  0.1405,  ..., -0...,  0.6633,  0.0792],
+          [ 1.9793,  0.0829, -2.1223,  ..., -0.6160, -0.5891,  1.4431]]]],
+       device='cuda:0')
+
+    def append(self, k: torch.Tensor, v: torch.Tensor):
+        """
+        Appends new KV tokens to the paged pool.
+        Standardized to rank-4 inputs (batch=1, heads, seq, dim).
+        """
+        # 1. Shape Normalization
+        # k, v are (batch, heads, seq, dim)
+        batch, n_heads, seq_len, head_dim = k.shape
+        assert batch == 1, "TurboQuant++ currently supports batch_size=1 (Streaming SOTA)."
+    
+        # 2. Block Allocation (Hardened Dispatch)
+        tokens_per_block = self.pool.tokens_per_block
+        for i in range(seq_len):
+            current_slot = self.num_tokens
+            slot_offset = current_slot % tokens_per_block
+    
+            if slot_offset == 0:
+                # Need a new block
+                new_block_id = self.pool.allocate_block()
+                self.block_ids.append(new_block_id)
+    
+            # SOTA Pillar 3: FP16 Fallback (Always stored for protected layers)
+            if self.k_quantizer is None:
+                current_block_id = self.block_ids[-1]
+                if current_block_id not in self.k_fp16:
+                    self.k_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+                    self.v_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+    
+                self.k_fp16[current_block_id][:, slot_offset] = k[:, :, i].squeeze(0)
+                self.v_fp16[current_block_id][:, slot_offset] = v[:, :, i].squeeze(0)
+    
+            # 2. Append to Physical Pool with Layer Isolation (Quantized Path)
+            if self.k_quantizer is not None:
+                current_block_id = self.block_ids[-1]
+    
+                # SOTA Pillar 1: Key Quantization (MSE + Sign)
+                k_in = k[:, :, i:i+1, :]
+                v_in = v[:, :, i:i+1, :]
+    
+                k_q = self.k_quantizer.quantize(k_in)
+    
+                # Physical Store (Layer-Aware Mapping)
+                li = self.layer_idx
+                self.pool.k_indices[li, current_block_id, :, slot_offset].copy_(k_q.mse_indices.reshape(n_heads, -1))
+                self.pool.k_qjl[li, current_block_id, :, slot_offset].copy_(k_q.qjl_signs.reshape(n_heads, -1))
+    
+                # 3. SOTA Pillar 2: Key Metadata (Per-Slot Dynamic Range Sync)
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, 0].copy_(k_q.norms.flatten())
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, 1].copy_(k_q.scales.flatten())
+    
+                pre_res_norms = k_q.residual_norms if hasattr(k_q, "residual_norms") else None
+                if pre_res_norms is not None:
+                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].copy_(pre_res_norms.to(self.device).flatten())
+                else:
+                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].fill_(0.0)
+    
+                # 4. SOTA Pillar 2: Asymmetric Value Quantization (Group-32 resolution)
+                v_q_in = v_in.squeeze(0).reshape(n_heads, self.pool.num_v_groups, self.pool.v_group_size)
+                v_min = v_q_in.min(dim=-1, keepdim=True).values
+                v_max = v_q_in.max(dim=-1, keepdim=True).values
+    
+                v_bits = self.pool.v_bits
+                v_scale = (v_max - v_min) / (2**v_bits - 1)
+                v_zero = v_min
+                v_scale = v_scale.clamp(min=1e-6)
+    
+                v_val = ((v_q_in - v_zero) / v_scale).round().clamp(0, 2**v_bits - 1).to(torch.uint8)
+    
+                # Physical Store (Value + Metadata)
+                v_flat = v_val.reshape(n_heads, -1)
+                if v_bits == 4:
+                    v_pack = v_flat[:, 0::2] | (v_flat[:, 1::2] << 4)
+                else:
+                    v_pack = v_flat
+    
+>               self.pool.v_indices[li, current_block_id, :, slot_offset].copy_(v_pack)
+E               RuntimeError: The size of tensor a (64) must match the size of tensor b (128) at non-singleton dimension 1
+
+src/turboquant/cache/manager.py:113: RuntimeError
+___________ TestPagedAttention.test_paged_vs_contiguous_parity[4-4] ____________
+
+self = <tests.test_paged_attention.TestPagedAttention object at 0x7bf6c3fc6ee0>
+k_bits = 4, v_bits = 4, seq_len = 200
+
+    @pytest.mark.parametrize("k_bits, v_bits", [(8, 3), (4, 4)])
+    def test_paged_vs_contiguous_parity(self, k_bits, v_bits, seq_len=200):
+        device = "cuda"
+        head_dim = 128
+        n_heads = 4
+        torch.manual_seed(42)
+    
+        pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, k_bits=k_bits, v_bits=v_bits)
+        kv_cache = TurboQuantKVCache(layer_idx=1, pool=pool)
+    
+        from turboquant.quant.key_quantizer import TurboQuantProd
+        from turboquant.quant.value_quantizer import TurboQuantValue
+        kv_cache.k_quantizer = TurboQuantProd(dim=head_dim, n_rotation_passes=2)
+        kv_cache.v_quantizer = TurboQuantValue(dim=head_dim)
+    
+        k_full = torch.randn((1, n_heads, seq_len, head_dim), device=device)
+        v_full = torch.randn((1, n_heads, seq_len, head_dim), device=device)
+>       kv_cache.append(k_full, v_full)
+
+tests/test_paged_attention.py:30: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <turboquant.cache.manager.TurboQuantKVCache object at 0x7bf6c3f76d30>
+k = tensor([[[[ 0.1940,  2.1614, -0.1721,  ..., -1.2072, -0.2438, -0.6784],
+          [ 0.1973,  0.9782, -0.0287,  ..., -0..., -0.4642,  0.3741],
+          [-1.4709, -0.1485,  0.8009,  ..., -0.6125,  1.5166, -0.8489]]]],
+       device='cuda:0')
+v = tensor([[[[ 0.1391, -0.1082, -0.7174,  ..., -0.1305,  1.1959, -0.6755],
+          [-0.5086,  0.9697,  0.1405,  ..., -0...,  0.6633,  0.0792],
+          [ 1.9793,  0.0829, -2.1223,  ..., -0.6160, -0.5891,  1.4431]]]],
+       device='cuda:0')
+
+    def append(self, k: torch.Tensor, v: torch.Tensor):
+        """
+        Appends new KV tokens to the paged pool.
+        Standardized to rank-4 inputs (batch=1, heads, seq, dim).
+        """
+        # 1. Shape Normalization
+        # k, v are (batch, heads, seq, dim)
+        batch, n_heads, seq_len, head_dim = k.shape
+        assert batch == 1, "TurboQuant++ currently supports batch_size=1 (Streaming SOTA)."
+    
+        # 2. Block Allocation (Hardened Dispatch)
+        tokens_per_block = self.pool.tokens_per_block
+        for i in range(seq_len):
+            current_slot = self.num_tokens
+            slot_offset = current_slot % tokens_per_block
+    
+            if slot_offset == 0:
+                # Need a new block
+                new_block_id = self.pool.allocate_block()
+                self.block_ids.append(new_block_id)
+    
+            # SOTA Pillar 3: FP16 Fallback (Always stored for protected layers)
+            if self.k_quantizer is None:
+                current_block_id = self.block_ids[-1]
+                if current_block_id not in self.k_fp16:
+                    self.k_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+                    self.v_fp16[current_block_id] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
+    
+                self.k_fp16[current_block_id][:, slot_offset] = k[:, :, i].squeeze(0)
+                self.v_fp16[current_block_id][:, slot_offset] = v[:, :, i].squeeze(0)
+    
+            # 2. Append to Physical Pool with Layer Isolation (Quantized Path)
+            if self.k_quantizer is not None:
+                current_block_id = self.block_ids[-1]
+    
+                # SOTA Pillar 1: Key Quantization (MSE + Sign)
+                k_in = k[:, :, i:i+1, :]
+                v_in = v[:, :, i:i+1, :]
+    
+                k_q = self.k_quantizer.quantize(k_in)
+    
+                # Physical Store (Layer-Aware Mapping)
+                li = self.layer_idx
+>               self.pool.k_indices[li, current_block_id, :, slot_offset].copy_(k_q.mse_indices.reshape(n_heads, -1))
+E               RuntimeError: The size of tensor a (64) must match the size of tensor b (128) at non-singleton dimension 1
+
+src/turboquant/cache/manager.py:81: RuntimeError
+________________________ test_quest_summary_consistency ________________________
+
+    def test_quest_summary_consistency():
+        """Verify that append() correctly updates Min/Max summaries."""
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        n_heads, head_dim = 4, 128
+        pool = KVBlockPool(num_blocks=2, head_dim=head_dim, n_heads=n_heads, device=device)
+        cache = TurboQuantKVCache(layer_idx=1, pool=pool)
+    
+        # 1. First token
+        k1 = torch.ones(1, n_heads, 1, head_dim, device=device) * 5.0
+        v1 = torch.ones(1, n_heads, 1, head_dim, device=device)
+        cache.append(k1, v1)
+    
+        bid = cache.block_ids[0]
+        # min/max should both be 5.0
+        print(f"DEBUG Summary Slot 0: Min={pool.k_summaries[1, bid, 0, 0, 0].item()}, Max={pool.k_summaries[1, bid, 0, 1, 0].item()}")
+>       assert torch.allclose(pool.k_summaries[1, bid, :, 0, :], torch.tensor(5.0, device=device))
+E       AssertionError: assert False
+E        +  where False = <built-in method allclose of type object at 0x7bf7c0bc3460>(tensor([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0.],\n        [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0.],\n        [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0.],\n        [0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.,\n         0., 0., 0., 0., 0., 0., 0., 0.]], device='cuda:0'), tensor(5., device='cuda:0'))
+E        +    where <built-in method allclose of type object at 0x7bf7c0bc3460> = torch.allclose
+E        +    and   tensor(5., device='cuda:0') = <built-in method tensor of type object at 0x7bf7c0bc3460>(5.0, device='cuda')
+E        +      where <built-in method tensor of type object at 0x7bf7c0bc3460> = torch.tensor
+
+tests/test_quest_sparsity.py:22: AssertionError
+----------------------------- Captured stdout call -----------------------------
+DEBUG Summary Slot 0: Min=0.0, Max=0.0
+=========================== short test summary info ============================
+FAILED tests/test_architectural_branching.py::test_fp16_paged_storage_and_gather
+FAILED tests/test_architectural_branching.py::test_hybrid_precision_paged_attention
+FAILED tests/test_kv_manager.py::test_kv_manager_paged_allocation - RuntimeEr...
+FAILED tests/test_kv_manager.py::test_kv_manager_metadata_fidelity - RuntimeE...
+FAILED tests/test_kv_manager.py::test_kv_manager_boundary_protection - Attrib...
+FAILED tests/test_paged_attention.py::TestPagedAttention::test_paged_vs_contiguous_parity[8-3]
+FAILED tests/test_paged_attention.py::TestPagedAttention::test_paged_vs_contiguous_parity[4-4]
+FAILED tests/test_quest_sparsity.py::test_quest_summary_consistency - Asserti...
+================== 8 failed, 157 passed, 3 skipped in 15.77s ===================

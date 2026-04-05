@@ -105,10 +105,8 @@ class TurboQuantKVCache:
                 
                 # Physical Store (Value + Metadata)
                 v_flat = v_val.reshape(n_heads, -1)
-                if v_bits == 4:
-                    v_pack = v_flat[:, 0::2] | (v_flat[:, 1::2] << 4)
-                else:
-                    v_pack = v_flat
+                from turboquant.quant.quant_base import pack_indices
+                v_pack = pack_indices(v_flat, v_bits) if v_bits < 8 else v_flat.to(torch.uint8)
                 
                 self.pool.v_indices[li, current_block_id, :, slot_offset].copy_(v_pack)
                 self.pool.v_metadata[li, current_block_id, :, slot_offset, :, 0].copy_(v_scale.squeeze(-1))

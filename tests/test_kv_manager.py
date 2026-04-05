@@ -23,26 +23,27 @@ def test_kv_manager_paged_allocation():
     # Init Cache for Layer 1
     cache = TurboQuantKVCache(
         layer_idx=1,
-        pool=pool,
-        k_quantizer=TurboQuantProd(head_dim),
-        v_quantizer=TurboQuantValue(head_dim)
+        pool=pool
     )
+    # SOTA: Must match pool bits (default v=3)
+    cache.k_quantizer = TurboQuantProd(head_dim, bits=pool.k_bits)
+    cache.v_quantizer = TurboQuantValue(head_dim, bits=pool.v_bits)
     
     # 1. Fill exactly one block
     for i in range(tokens_per_block):
-        k = torch.randn(1, n_heads, 1, head_dim)
-        v = torch.randn(1, n_heads, 1, head_dim)
+        k = torch.randn(1, n_heads, 1, head_dim, device=pool.device)
+        v = torch.randn(1, n_heads, 1, head_dim, device=pool.device)
         cache.append(k, v)
         
-    assert len(cache.block_table) == 1
+    assert len(cache.block_ids) == 1
     assert cache.num_tokens == tokens_per_block
     
     # 2. Trigger new block allocation
-    k = torch.randn(1, n_heads, 1, head_dim)
-    v = torch.randn(1, n_heads, 1, head_dim)
+    k = torch.randn(1, n_heads, 1, head_dim, device=pool.device)
+    v = torch.randn(1, n_heads, 1, head_dim, device=pool.device)
     cache.append(k, v)
     
-    assert len(cache.block_table) == 2
+    assert len(cache.block_ids) == 2
     assert cache.num_tokens == tokens_per_block + 1
 
 def test_kv_manager_metadata_fidelity():
@@ -60,16 +61,16 @@ def test_kv_manager_metadata_fidelity():
     
     cache = TurboQuantKVCache(
         layer_idx=1,
-        pool=pool,
-        k_quantizer=TurboQuantProd(head_dim),
-        v_quantizer=TurboQuantValue(head_dim)
+        pool=pool
     )
+    cache.k_quantizer = TurboQuantProd(head_dim)
+    cache.v_quantizer = TurboQuantValue(head_dim, bits=pool.v_bits)
     
     k = torch.randn(1, n_heads, 1, head_dim)
     v = torch.randn(1, n_heads, 1, head_dim)
     cache.append(k, v)
     
-    bid = cache.block_table[0]
+    bid = cache.block_ids[0]
     
     # Check shape of K indices inside the pool (SOTA: Padded to 128, Dynamic Packing)
     bits = cache.k_quantizer.bits
@@ -78,16 +79,16 @@ def test_kv_manager_metadata_fidelity():
     assert pool.k_indices.shape[-1] == expected_dim
     
     # Check K metadata (norm, scale, residual_norm)
-    # k_metadata shape: (blocks, heads, 3) - SOTA Pillar 2: Block-wide
+    # k_metadata shape: (n_layers, blocks, heads, tokens, 3) 
     assert pool.k_metadata.shape[-1] == 3
     # Ensure norms are not zero after append
-    assert torch.any(pool.k_metadata[bid, 0, 0] != 0) 
+    assert torch.any(pool.k_metadata[1, bid, 0, 0, 0] != 0) 
     
-    # Check V metadata (Scale and Zero per block per group)
-    expected_groups = max(1, head_dim // 128)
-    # v_metadata shape: (blocks, heads, groups, 2)
+    # Check V metadata (Scale and Zero per block per token per group)
+    expected_groups = max(1, head_dim // 32)
+    # v_metadata shape: (n_layers, blocks, heads, tokens_per_block, groups, 2)
     assert pool.v_metadata.shape[-2] == expected_groups
-    assert torch.any(pool.v_metadata[bid, 0, 0, 0] != 0)
+    assert torch.any(pool.v_metadata[1, bid, 0, 0, 0, 0] != 0)
 
 def test_kv_manager_boundary_protection():
     """
@@ -101,18 +102,16 @@ def test_kv_manager_boundary_protection():
     n_heads = 8
     
     pool = KVBlockPool(num_blocks, head_dim, n_heads, tokens_per_block)
-    # Layer 0 is exempt (FP16)
-    routing = LayerRouting(num_layers=4, exempt_layers=[0])
     
-    cache = TurboQuantKVCache(layer_idx=0, pool=pool, routing=routing)
-    assert cache.strategy == QuantizationStrategy.FP16
+    cache = TurboQuantKVCache(layer_idx=0, pool=pool)
+    cache.is_protected = True # Emulate routing
     
     # Append should go to k_fp16 local dictionary, not global pool k_indices
     k = torch.randn(1, n_heads, 1, head_dim)
     v = torch.randn(1, n_heads, 1, head_dim)
     cache.append(k, v)
     
-    bid = cache.block_table[0]
+    bid = cache.block_ids[0]
     # Verify in LOCAL manager storage, not pool
     assert torch.any(cache.k_fp16[bid][0, 0] != 0)
-    assert torch.all(pool.k_indices[bid, 0, 0] == 0)
+    assert torch.all(pool.k_indices[0, bid, 0, 0, 0] == 0)

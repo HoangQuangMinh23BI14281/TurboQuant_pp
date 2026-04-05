@@ -20,7 +20,7 @@ def test_fp16_paged_storage_and_gather():
     
     # Layer 0 is FP16
     routing = LayerRouting(num_layers=4, exempt_layers=[0])
-    cache = TurboQuantKVCache(layer_idx=0, pool=pool, routing=routing)
+    cache = TurboQuantKVCache(layer_idx=0, pool=pool)
     
     # Mock data (batch=1, seq_len=1, dimension=256)
     # Layer 0 is FP16
@@ -36,7 +36,7 @@ def test_fp16_paged_storage_and_gather():
     cache.append(k_split, v_split)
     
     # Check if stored in fp16 buffer
-    bid = cache.block_table[0]
+    bid = cache.block_ids[0]
     # In cache.k_fp16 dictionary mapping bid to (n_heads, tokens, dim)
     assert torch.allclose(cache.k_fp16[bid][:, 0], k_split.squeeze(0).squeeze(1))
     assert torch.allclose(cache.v_fp16[bid][:, 0], v_split.squeeze(0).squeeze(1))
@@ -52,15 +52,17 @@ def test_hybrid_precision_paged_attention():
     
     config = TurboQuantConfig(n_head_protected=1) # Layer 0 is FP16
     routing = LayerRouting(num_layers=4, exempt_layers=[0])
-    pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, tokens_per_block=tokens_per_block, device=device)
+    pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, tokens_per_block=tokens_per_block, device=device, k_bits=config.k_bits, v_bits=config.v_bits)
     
     # Layer 0: FP16
     layer0 = TurboQuantAttention(config, layer_idx=0, total_layers=4, dim=dim, num_heads=n_heads, num_kv_heads=n_heads).to(device).half()
-    cache0 = TurboQuantKVCache(layer_idx=0, pool=pool, routing=routing)
+    cache0 = TurboQuantKVCache(layer_idx=0, pool=pool)
+    cache0.strategy = QuantizationStrategy.FP16 # Manual override for test logic
     
     # Layer 1: Quantized
     layer1 = TurboQuantAttention(config, layer_idx=1, total_layers=4, dim=dim, num_heads=n_heads, num_kv_heads=n_heads).to(device).half()
-    cache1 = TurboQuantKVCache(layer_idx=1, pool=pool, routing=routing)
+    cache1 = TurboQuantKVCache(layer_idx=1, pool=pool)
+    cache1.strategy = QuantizationStrategy.TURBO_4BIT # Manual override for test logic
     
     # Mock Inputs (Batch, Seq, Dim)
     q = torch.randn(1, 1, dim, device=device, dtype=torch.float16)

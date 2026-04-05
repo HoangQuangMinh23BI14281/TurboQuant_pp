@@ -14,7 +14,7 @@ def test_qjl_correlation_improvement(d, bits):
     """
     torch.manual_seed(42)
     n_q, n_k = 10, 100
-    q_module = TurboQuantProd(d, bits)
+    q_module = TurboQuantProd(d, bits, n_rotation_passes=2)
     
     query = torch.randn(n_q, d)
     key = torch.randn(n_k, d)
@@ -59,7 +59,7 @@ def test_qjl_correlation_improvement(d, bits):
 def test_qjl_correction_scale():
     """Verify QJL correction is within expected numerical bounds."""
     d, bits = 128, 4
-    q_module = TurboQuantProd(d, bits)
+    q_module = TurboQuantProd(d, bits, n_rotation_passes=2)
     query = torch.randn(5, d)
     key = torch.randn(20, d)
     
