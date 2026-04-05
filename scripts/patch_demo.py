@@ -46,12 +46,11 @@ def atomic_demo():
     head_dim = model.config.hidden_size // n_heads
     
     pool = KVBlockPool(
-        num_blocks=1024, 
+        config=tq_config,
         head_dim=head_dim, 
         n_heads=n_kv_heads, 
-        device=device,
-        k_bits=tq_config.k_bits,
-        v_bits=tq_config.v_bits
+        num_blocks=1024,
+        device=device
     )
     container = TurboQuantCacheContainer(num_layers=n_layers, pool=pool)
     

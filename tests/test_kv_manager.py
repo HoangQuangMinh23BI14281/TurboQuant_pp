@@ -4,6 +4,7 @@ from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.quant.key_quantizer import TurboQuantProd
 from turboquant.quant.value_quantizer import TurboQuantValue
+from turboquant.layers.config import TurboQuantConfig
 
 def test_kv_manager_paged_allocation():
     num_layers = 4
@@ -12,12 +13,13 @@ def test_kv_manager_paged_allocation():
     head_dim = 128
     n_heads = 8
     
-    # Signature: num_blocks, head_dim, n_heads, tokens_per_block
+    # Signature: config, head_dim, n_heads, num_blocks
+    config = TurboQuantConfig(tokens_per_block=tokens_per_block)
     pool = KVBlockPool(
-        num_blocks=num_blocks, 
+        config=config,
         head_dim=head_dim, 
         n_heads=n_heads, 
-        tokens_per_block=tokens_per_block
+        num_blocks=num_blocks
     )
     
     # Init Cache for Layer 1
@@ -52,22 +54,23 @@ def test_kv_manager_metadata_fidelity():
     n_heads = 8
     head_dim = 256 # 2 groups of Block-128
     
+    config = TurboQuantConfig(tokens_per_block=tokens_per_block)
     pool = KVBlockPool(
-        num_blocks=num_blocks, 
+        config=config,
         head_dim=head_dim, 
         n_heads=n_heads, 
-        tokens_per_block=tokens_per_block
+        num_blocks=num_blocks
     )
     
     cache = TurboQuantKVCache(
         layer_idx=1,
         pool=pool
     )
-    cache.k_quantizer = TurboQuantProd(head_dim)
+    cache.k_quantizer = TurboQuantProd(head_dim, bits=pool.k_bits)
     cache.v_quantizer = TurboQuantValue(head_dim, bits=pool.v_bits)
     
-    k = torch.randn(1, n_heads, 1, head_dim)
-    v = torch.randn(1, n_heads, 1, head_dim)
+    k = torch.randn(1, n_heads, 1, head_dim, device=pool.device)
+    v = torch.randn(1, n_heads, 1, head_dim, device=pool.device)
     cache.append(k, v)
     
     bid = cache.block_ids[0]
@@ -101,14 +104,15 @@ def test_kv_manager_boundary_protection():
     head_dim = 128
     n_heads = 8
     
-    pool = KVBlockPool(num_blocks, head_dim, n_heads, tokens_per_block)
+    config = TurboQuantConfig(tokens_per_block=tokens_per_block)
+    pool = KVBlockPool(config, head_dim, n_heads, num_blocks)
     
     cache = TurboQuantKVCache(layer_idx=0, pool=pool)
     cache.is_protected = True # Emulate routing
     
     # Append should go to k_fp16 local dictionary, not global pool k_indices
-    k = torch.randn(1, n_heads, 1, head_dim)
-    v = torch.randn(1, n_heads, 1, head_dim)
+    k = torch.randn(1, n_heads, 1, head_dim, device=pool.device)
+    v = torch.randn(1, n_heads, 1, head_dim, device=pool.device)
     cache.append(k, v)
     
     bid = cache.block_ids[0]

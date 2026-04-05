@@ -3,6 +3,7 @@ import math
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.routing import LayerRouting
+from turboquant.layers.config import TurboQuantConfig
 
 def debug_parity():
     device = "cuda"
@@ -12,7 +13,8 @@ def debug_parity():
     k_bits, v_bits = 8, 4
     
     torch.manual_seed(42)
-    pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, k_bits=k_bits, v_bits=v_bits)
+    config = TurboQuantConfig(k_bits=k_bits, v_bits=v_bits)
+    pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=20)
     kv_cache = TurboQuantKVCache(layer_idx=1, pool=pool, routing=LayerRouting(10, [0]))
 
     k_raw = torch.randn((1, n_heads, seq_len, head_dim), device=device)

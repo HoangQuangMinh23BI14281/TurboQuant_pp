@@ -3,15 +3,17 @@ import pytest
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.routing import LayerRouting
+from turboquant.layers.config import TurboQuantConfig
 
 def test_quest_summary_consistency():
     """Verify that append() correctly updates Min/Max summaries."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     n_heads, head_dim = 4, 128
-    pool = KVBlockPool(num_blocks=2, head_dim=head_dim, n_heads=n_heads, device=device)
+    config = TurboQuantConfig()
+    pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=2, device=device)
     cache = TurboQuantKVCache(layer_idx=1, pool=pool)
     from turboquant.quant.key_quantizer import TurboQuantProd
-    cache.k_quantizer = TurboQuantProd(head_dim, n_rotation_passes=2)
+    cache.k_quantizer = TurboQuantProd(head_dim, bits=pool.k_bits, n_rotation_passes=2)
     
     # 1. First token
     k1 = torch.ones(1, n_heads, 1, head_dim, device=device) * 5.0
@@ -44,7 +46,8 @@ def test_quest_skip_logic():
         
     device = "cuda"
     n_heads, head_dim = 1, 128
-    pool = KVBlockPool(num_blocks=4, head_dim=head_dim, n_heads=n_heads, device=device)
+    config = TurboQuantConfig()
+    pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=4, device=device)
     cache = TurboQuantKVCache(layer_idx=1, pool=pool)
     
     # Block 1: Signal (Value 0.1)

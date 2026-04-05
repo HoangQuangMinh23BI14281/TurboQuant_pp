@@ -15,8 +15,9 @@ def test_fp16_paged_storage_and_gather():
     n_heads = 4
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Signature: num_blocks, head_dim, n_heads, tokens_per_block
-    pool = KVBlockPool(num_blocks=num_blocks, head_dim=head_dim, n_heads=n_heads, tokens_per_block=tokens_per_block, device=device)
+    # Signature: config, head_dim, n_heads, num_blocks
+    config = TurboQuantConfig(tokens_per_block=tokens_per_block)
+    pool = KVBlockPool(config=config, head_dim=head_dim, n_heads=n_heads, num_blocks=num_blocks, device=device)
     
     # Layer 0 is FP16
     routing = LayerRouting(num_layers=4, exempt_layers=[0])
@@ -50,9 +51,9 @@ def test_hybrid_precision_paged_attention():
     head_dim = dim // n_heads # 64
     tokens_per_block = 16
     
-    config = TurboQuantConfig(n_head_protected=1) # Layer 0 is FP16
+    config = TurboQuantConfig(n_head_protected=1, tokens_per_block=tokens_per_block) # Layer 0 is FP16
     routing = LayerRouting(num_layers=4, exempt_layers=[0])
-    pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, tokens_per_block=tokens_per_block, device=device, k_bits=config.k_bits, v_bits=config.v_bits)
+    pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=20, device=device)
     
     # Layer 0: FP16
     layer0 = TurboQuantAttention(config, layer_idx=0, total_layers=4, dim=dim, num_heads=n_heads, num_kv_heads=n_heads).to(device).half()

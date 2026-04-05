@@ -21,12 +21,12 @@ def debug():
     print(f"--- DEBUG HYBRID PRECISION ---")
     print(f"Device: {device}, Head Dim: {head_dim}")
     
-    # Correct Signature: num_blocks, head_dim, n_heads, tokens_per_block
+    config = TurboQuantConfig(n_head_protected=1, group_size=tokens_per_block) 
     pool = KVBlockPool(
-        num_blocks=n_blocks, 
+        config=config,
         head_dim=head_dim, 
         n_heads=n_heads, 
-        tokens_per_block=tokens_per_block, 
+        num_blocks=n_blocks, 
         device=device
     )
     

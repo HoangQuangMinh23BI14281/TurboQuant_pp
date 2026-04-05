@@ -99,7 +99,7 @@ class TurboQuantKVCache:
                 v_bits = self.pool.v_bits
                 v_scale = (v_max - v_min) / (2**v_bits - 1)
                 v_zero = v_min
-                v_scale = v_scale.clamp(min=1e-6)
+                v_scale = v_scale.clamp(min=self.pool.config.v_scale_epsilon)
                 
                 v_val = ((v_q_in - v_zero) / v_scale).round().clamp(0, 2**v_bits - 1).to(torch.uint8)
                 
@@ -171,7 +171,7 @@ class TurboQuantCacheContainer(Cache):
 
     def get_max_length(self) -> Optional[int]:
         """TurboQuant++ Paged Attention is dynamically unbounded."""
-        return 4096
+        return self.pool.config.max_seq_len
 
     def update_seq_length(self, increment: int = 1):
         """Bắt buộc phải tự tăng biến này sau mỗi bước để đánh lừa HF"""

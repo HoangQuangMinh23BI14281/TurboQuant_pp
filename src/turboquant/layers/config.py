@@ -25,6 +25,13 @@ class TurboQuantConfig:
     n_rotation_passes: int = 1
     qjl_scale: float = 0.1 # Calibrated SOTA Scale
     quest_threshold: float = -1e6 # Default: Disable sparsity for stability
+
+    # Cache & Memory Management
+    num_blocks: int = 1024
+    tokens_per_block: int = 128
+    max_seq_len: int = 4096
+    v_scale_epsilon: float = 1e-6
+    hardware_alignment: int = 128
     
     # Advanced routing (Layer-specific overrides)
     layer_overrides: Dict[int, Dict] = field(default_factory=dict)

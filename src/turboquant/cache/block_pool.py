@@ -9,73 +9,71 @@ class KVBlockPool:
     """
     def __init__(
         self,
-        num_blocks: int,
+        config, # TurboQuantConfig (Pass Any to avoid circular import)
         head_dim: int,
         n_heads: int,
-        tokens_per_block: int = 128, # SOTA Standard: Block-128
+        num_blocks: Optional[int] = None,
         device: str = "cuda",
         dtype: torch.dtype = torch.float16,
-        k_bits: int = 8,
-        v_bits: int = 3,
-        v_vals_per_byte: int = 2, # 3-bit packed as 4-bit (2 per byte)
         n_layers: int = 24
     ):
-        self.num_blocks = num_blocks
+        self.config = config
+        self.num_blocks = num_blocks if num_blocks is not None else config.num_blocks
         self.head_dim = head_dim
         self.n_heads = n_heads
-        self.tokens_per_block = tokens_per_block
+        self.tokens_per_block = config.tokens_per_block
         self.device = device
         self.dtype = dtype
-        self.k_bits = k_bits
-        self.v_bits = v_bits
-        self.v_vals_per_byte = v_vals_per_byte
+        self.k_bits = config.k_bits
+        self.v_bits = config.v_bits
         self.n_layers = n_layers
+        self.v_group_size = config.v_group_size
         
         # SOTA: Dimension Alignment (No legacy padding for small heads)
         self.padded_head_dim = head_dim
         
         # 1. Calculated Buffer Sizes (Dynamic based on packing logic)
         # Key Indices (MSE): vals_per_byte = 8 // (bits-1)
-        k_mse_bits = max(1, k_bits - 1)
+        k_mse_bits = max(1, self.k_bits - 1)
         k_vals_per_byte = 8 // k_mse_bits
-        self.k_idx_bytes = head_dim // k_vals_per_byte
+        self.k_idx_bytes = self.head_dim // k_vals_per_byte
         
         # Key QJL Signs: 1-bit packed (8 items per byte)
-        self.k_qjl_bytes = head_dim // 8
+        self.k_qjl_bytes = self.head_dim // 8
         
         # Value Indices: vals_per_byte = 8 // bits
-        v_vals_per_byte = 8 // v_bits
-        self.v_idx_bytes = head_dim // v_vals_per_byte
+        v_vals_per_byte = 8 // self.v_bits
+        self.v_idx_bytes = self.head_dim // v_vals_per_byte
         
         # 2. Static Pre-allocation
         # Key Physical Storage
         self.k_indices = torch.zeros(
-            (n_layers, num_blocks, n_heads, tokens_per_block, self.k_idx_bytes), 
+            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.k_idx_bytes), 
             dtype=torch.uint8, device=self.device
         )
         self.k_qjl = torch.zeros(
-            (n_layers, num_blocks, n_heads, tokens_per_block, self.k_qjl_bytes), 
+            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.k_qjl_bytes), 
             dtype=torch.uint8, device=self.device
         )
         
         # Key Metadata: (norm, scale, residual_norm) per SLOT (SOTA Pillar 2: Dynamic Range Sync)
         self.k_metadata = torch.zeros(
-            (n_layers, num_blocks, n_heads, tokens_per_block, 3), 
+            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, 3), 
             dtype=torch.float32, device=self.device
         )
         
         # Value Physical Storage
         self.v_indices = torch.zeros(
-            (n_layers, num_blocks, n_heads, tokens_per_block, self.v_idx_bytes),
+            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.v_idx_bytes),
             dtype=torch.uint8, device=self.device
         )
         
         # SOTA: Block-wide metadata for Value (One set per 32 tokens for high resolution)
         self.v_group_size = 32
-        self.num_v_groups = head_dim // self.v_group_size
+        self.num_v_groups = self.head_dim // self.v_group_size
         self.v_metadata = torch.zeros(
             # VÁ LỖI CỰC ĐẠI TẠI ĐÂY: Thêm chiều Tokens_per_block (Slot Sequence) 
-            (n_layers, num_blocks, n_heads, tokens_per_block, self.num_v_groups, 2), # (Scale, Zero) per Group, per Token
+            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.num_v_groups, 2), # (Scale, Zero) per Group, per Token
             dtype=torch.float32, device=self.device
         )
         
@@ -83,12 +81,12 @@ class KVBlockPool:
         # k_summaries: (n_layers, num_blocks, n_heads, 2, padded_head_dim) -> [min, max] for block-level Quest skipping
         # SOTA: summaries must match the Rotated Domain (padded to 128)
         self.k_summaries = torch.zeros(
-            (n_layers, num_blocks, n_heads, 2, self.padded_head_dim),
+            (self.n_layers, self.num_blocks, self.n_heads, 2, self.padded_head_dim),
             dtype=torch.float32, device=self.device
         )
         # block_importance: (n_layers, num_blocks, n_heads) -> Cumulative Softmax score for H2O eviction
         self.block_importance = torch.zeros(
-            (n_layers, num_blocks, n_heads),
+            (self.n_layers, self.num_blocks, self.n_heads),
             dtype=torch.float32, device=self.device
         )
         

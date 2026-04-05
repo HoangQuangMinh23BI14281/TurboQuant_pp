@@ -5,6 +5,9 @@ from typing import Any
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.routing import LayerRouting
+from turboquant.layers.config import TurboQuantConfig
+from turboquant.quant.key_quantizer import TurboQuantProd
+from turboquant.quant.value_quantizer import TurboQuantValue
 
 class TestPagedAttention:
     """
@@ -17,11 +20,11 @@ class TestPagedAttention:
         n_heads = 4
         torch.manual_seed(42)
 
-        pool = KVBlockPool(num_blocks=20, head_dim=head_dim, n_heads=n_heads, k_bits=k_bits, v_bits=v_bits)
+        config = TurboQuantConfig(k_bits=k_bits, v_bits=v_bits)
+        pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=20)
         kv_cache = TurboQuantKVCache(layer_idx=1, pool=pool)
         
-        from turboquant.quant.key_quantizer import TurboQuantProd
-        from turboquant.quant.value_quantizer import TurboQuantValue
+        
         kv_cache.k_quantizer = TurboQuantProd(dim=head_dim, bits=k_bits, n_rotation_passes=2)
         kv_cache.v_quantizer = TurboQuantValue(dim=head_dim, bits=v_bits)
 

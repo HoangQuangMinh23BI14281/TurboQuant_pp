@@ -2,6 +2,7 @@ import torch
 import pytest
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.cache.block_pool import KVBlockPool
+from turboquant.layers.config import TurboQuantConfig
 
 def test_h2o_importance_accumulation():
     pytest.skip("H2O Eviction is temporarily frozen for architectural stabilization.")
@@ -10,7 +11,8 @@ def test_h2o_importance_accumulation():
         
     device = "cuda"
     n_heads, head_dim = 4, 128
-    pool = KVBlockPool(num_blocks=10, head_dim=head_dim, n_heads=n_heads, device=device)
+    config = TurboQuantConfig()
+    pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=10, device=device)
     cache = TurboQuantKVCache(layer_idx=1, pool=pool)
     
     # Fill 2 blocks
@@ -40,7 +42,8 @@ def test_h2o_eviction_integrity():
         
     device = "cuda"
     n_heads, head_dim = 1, 128
-    pool = KVBlockPool(num_blocks=10, head_dim=head_dim, n_heads=n_heads, device=device)
+    config = TurboQuantConfig()
+    pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=10, device=device)
     cache = TurboQuantKVCache(layer_idx=1, pool=pool)
     
     # 1. Fill 4 blocks
