@@ -18,7 +18,7 @@ class TurboQuantValue(nn.Module):
         assert dim % self.group_size == 0
         self.n_groups = dim // self.group_size
 
-    def quantize(self, x: torch.Tensor, pack: bool = True) -> ValueQuantized:
+    def quantize(self, x: torch.Tensor, pack: bool = True, epsilon: float = 1e-10) -> ValueQuantized:
         shape = x.shape[:-1]
         x_grouped = x.view(*shape, self.n_groups, self.group_size)
         
@@ -27,10 +27,10 @@ class TurboQuantValue(nn.Module):
         
         # SOTA: Linear Asymmetric Quantization
         # V = (idx * scale) + min
-        v_scale = (v_max - v_min) / (self.n_levels - 1 + 1e-10)
+        v_scale = (v_max - v_min) / (self.n_levels - 1 + epsilon)
         
         # indices = round((x - min) / scale)
-        indices = torch.round((x_grouped - v_min) / (v_scale + 1e-10)).clamp(0, self.n_levels - 1)
+        indices = torch.round((x_grouped - v_min) / (v_scale + epsilon)).clamp(0, self.n_levels - 1)
         
         indices = indices.view(*shape, self.dim).to(torch.uint8)
         scales = v_scale.view(*shape, self.n_groups)

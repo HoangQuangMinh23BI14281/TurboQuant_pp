@@ -24,6 +24,7 @@ class TurboQuantMSE(nn.Module):
         self.n_levels = 2 ** bits
         self.n_rotation_passes = n_rotation_passes
         self.strategy = QuantizationStrategy.TURBO_MSE
+        self.epsilon = 1e-10 # Default fallback
 
         # SOTA: Auto-calculate power-of-2 block size nearest to dim
         bs = int(2 ** math.ceil(math.log2(dim)))
@@ -57,7 +58,7 @@ class TurboQuantMSE(nn.Module):
         else:
             vec_norms = torch.norm(x, p=2, dim=-1)
             
-        x_unit = (x / (vec_norms.unsqueeze(-1) + 1e-10)).contiguous()
+        x_unit = (x / (vec_norms.unsqueeze(-1) + self.epsilon)).contiguous()
 
         if self.padded:
             padding = torch.zeros((*shape, self.block_size - self.dim), device=device, dtype=dtype)
@@ -71,19 +72,19 @@ class TurboQuantMSE(nn.Module):
         # 3. Step: Linear Scaling (Sticky-aware)
         if precomputed_scales is not None:
             refined_gamma = precomputed_scales
-            x_normalized = x_rotated / (refined_gamma + 1e-10)
+            x_normalized = x_rotated / (refined_gamma + self.epsilon)
         else:
             rms_scales = torch.norm(x_rotated, dim=-1, keepdim=True) / math.sqrt(self.block_size)
-            x_normalized = x_rotated / (rms_scales + 1e-10)
+            x_normalized = x_rotated / (rms_scales + self.epsilon)
             
             # Lloyd-Max refinement (Lloyd-Max + RMS)
             indices_tmp = lloyd_max_quantize(x_normalized, self.bits, dist='gaussian')
             reconstructed_unit = lloyd_max_dequantize(indices_tmp, self.bits, dist='gaussian')
             
             numerator = (x_rotated * reconstructed_unit).sum(dim=-1, keepdim=True)
-            denominator = (reconstructed_unit * reconstructed_unit).sum(dim=-1, keepdim=True) + 1e-10
+            denominator = (reconstructed_unit * reconstructed_unit).sum(dim=-1, keepdim=True) + self.epsilon
             refined_gamma = numerator / denominator
-            x_normalized = x_rotated / (refined_gamma + 1e-10)
+            x_normalized = x_rotated / (refined_gamma + self.epsilon)
             
         indices = lloyd_max_quantize(x_normalized, self.bits, dist='gaussian')
         
@@ -129,7 +130,7 @@ class TurboQuantMSE(nn.Module):
         reconstructed_rotated = reconstructed_unit * mse_q.scales
         
         # 3. Get Input in Rotated Domain (using Sticky Norm)
-        x_unit = (x / (mse_q.norms.unsqueeze(-1) + 1e-10)).contiguous()
+        x_unit = (x / (mse_q.norms.unsqueeze(-1) + self.epsilon)).contiguous()
         if self.padded:
             x_padded = torch.cat([x_unit, torch.zeros((*x.shape[:-1], self.block_size - self.dim), device=x.device, dtype=x.dtype)], dim=-1)
         else:
@@ -205,8 +206,8 @@ class TurboQuantProd(nn.Module):
         signs_float = qjl_signs.float() * 2.0 - 1.0
         residual_direction = signs_float 
 
-        dir_norm = torch.norm(residual_direction, dim=-1, keepdim=True) + 1e-10
-        unit_res_norms = q.residual_norms / (q.norms + 1e-10)
+        dir_norm = torch.norm(residual_direction, dim=-1, keepdim=True) + self.mse_quantizer.epsilon
+        unit_res_norms = q.residual_norms / (q.norms + self.mse_quantizer.epsilon)
         residual_estimated_unit = residual_direction * (unit_res_norms.unsqueeze(-1) / dir_norm)
 
         combined_rotated = reconstructed_mse_rot + residual_estimated_unit

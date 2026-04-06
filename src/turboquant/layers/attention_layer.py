@@ -56,6 +56,7 @@ class TurboQuantAttention(nn.Module):
                 bits=self.k_bits, 
                 n_rotation_passes=tq_config.n_rotation_passes
             )
+            self.k_quantizer.mse_quantizer.epsilon = tq_config.quant_epsilon
             self.v_quantizer = TurboQuantValue(
                 self.head_dim, 
                 bits=self.v_bits,
@@ -131,7 +132,7 @@ class TurboQuantAttention(nn.Module):
                 )
             else:
                 # 2.2 Decode Path: Paged Triton Kernel
-                sm_scale = 1.0 / (self.head_dim ** 0.5)
+                sm_scale = self.tq_config.sm_scale if self.tq_config.sm_scale is not None else 1.0 / (self.head_dim ** 0.5)
                 out = paged_turboquant_attention(
                     query=q, 
                     kv_cache=kv_cache, 
@@ -140,7 +141,7 @@ class TurboQuantAttention(nn.Module):
                     qjl_scale=self.tq_config.qjl_scale,
                     sm_scale=sm_scale,
                     mask=mask,
-                    quest_threshold=self.tq_config.quest_threshold # <--- DÒNG NÀY CỰC KỲ QUAN TRỌNG
+                    quest_threshold=self.tq_config.quest_threshold
                 )
         else:
             # 3. Fallback Path: No Cache 

@@ -9,7 +9,7 @@ class RotaryPositionalEmbeddings(nn.Module):
     Reference: https://arxiv.org/abs/2104.09864
     """
 
-    def __init__(self, d: int, base: int = 1_000_000): # Qwen2.5 Base (SOTA Standard)
+    def __init__(self, d: int, base: int = 1_000_000): 
         super().__init__()
         self.d = d
         self.base = base

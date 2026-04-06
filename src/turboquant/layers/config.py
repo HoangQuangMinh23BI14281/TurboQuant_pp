@@ -25,6 +25,8 @@ class TurboQuantConfig:
     n_rotation_passes: int = 1
     qjl_scale: float = 0.1 # Calibrated SOTA Scale
     quest_threshold: float = -1e6 # Default: Disable sparsity for stability
+    rope_base: int = 1_000_000   # Qwen2.5 Base (Standard SOTA)
+    quant_epsilon: float = 1e-10 # Numerical stability constant
 
     # Cache & Memory Management
     num_blocks: int = 1024
@@ -34,6 +36,7 @@ class TurboQuantConfig:
     hardware_alignment: int = 128
     
     # Advanced routing (Layer-specific overrides)
+    sm_scale: Optional[float] = None
     layer_overrides: Dict[int, Dict] = field(default_factory=dict)
 
     def is_protected(self, layer_idx: int, total_layers: int) -> bool:

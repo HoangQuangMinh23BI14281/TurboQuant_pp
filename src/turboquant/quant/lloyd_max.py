@@ -202,7 +202,7 @@ def _laplace_conditional_expectation(a: float, b: float, b_param: float = 1.0) -
 
 _CODEBOOK_CACHE = {}
 
-def compute_lloyd_max_codebook(bits: int, d: int = 1, dist: str = 'gaussian', max_iter: int = 40) -> Dict:
+def compute_lloyd_max_codebook(bits: int, d: int = 1, dist: str = 'gaussian', max_iter: int = 40, epsilon: float = 1e-10) -> Dict:
     """
     Compute optimal Lloyd-Max centroids/boundaries for a given distribution.
     - 'gaussian': used for Key cache (rotated domain follows N(0, 1/d)).
@@ -249,7 +249,7 @@ def compute_lloyd_max_codebook(bits: int, d: int = 1, dist: str = 'gaussian', ma
             centroids[i] = expectation_fn(bounds[i], bounds[i+1], sigma_or_b)
         
         new_b = (centroids[:-1] + centroids[1:]) / 2.0
-        if np.allclose(boundaries, new_b, atol=1e-8):
+        if np.allclose(boundaries, new_b, atol=epsilon):
             break
         boundaries = new_b.tolist()
     
