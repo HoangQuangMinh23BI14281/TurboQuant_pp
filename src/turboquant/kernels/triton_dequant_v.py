@@ -72,7 +72,7 @@ def _dequantize_v_kernel(
         mask=n_mask[:, None] & d_mask[None, :]
     )
 
-def dequantize_value_triton(indices, scales, zeros, group_size=128, bits=4):
+def dequantize_value_triton(indices, scales, zeros, group_size=128, bits=4, num_warps=4):
     """
     Python wrapper for the standalone Value dequantization kernel (SOTA: Packed).
     """
@@ -114,7 +114,7 @@ def dequantize_value_triton(indices, scales, zeros, group_size=128, bits=4):
         V_VALS_PER_BYTE=v_vals_per_byte,
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
-        num_warps=4
+        num_warps=num_warps
     )
     
     if indices.dim() == 4:

@@ -62,6 +62,8 @@ def turboquant_qjl_score(
     norms: torch.Tensor, # Unused here but kept for signature compatibility
     qjl_scale: float,
     out: Optional[torch.Tensor] = None,
+    block_n: Optional[int] = None,
+    num_warps: Optional[int] = None,
 ) -> torch.Tensor:
     if q_sketched.dim() == 1:
         q_sketched = q_sketched.unsqueeze(0)
@@ -84,7 +86,8 @@ def turboquant_qjl_score(
     if out is None:
         out = torch.zeros((BH, N), device=q_sketched.device, dtype=torch.float32)
     
-    BLOCK_N = 128
+    BLOCK_N = block_n if block_n else 128
+    num_warps = num_warps if num_warps else 4
     grid = (BH, triton.cdiv(N, BLOCK_N))
 
     _turboquant_qjl_score_kernel[grid](
@@ -95,6 +98,7 @@ def turboquant_qjl_score(
         out.stride(0), out.stride(1),
         N=N, D=D, PACKED_D_SIGNS=packed_d_signs, NQ=NQ,
         QJL_SCALE=qjl_scale,
-        BLOCK_N=BLOCK_N
+        BLOCK_N=BLOCK_N,
+        num_warps=num_warps
     )
     return out

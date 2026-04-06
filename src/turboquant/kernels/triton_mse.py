@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from .triton_utils import _get_packing_params
+from typing import Optional
 
 @triton.jit
 def _turboquant_mse_score_kernel(
@@ -65,6 +66,8 @@ def turboquant_mse_score(
     centroids: torch.Tensor,
     mse_bits: int,
     mse_scale: float = 1.0,
+    block_n: Optional[int] = None,
+    num_warps: Optional[int] = None,
 ) -> torch.Tensor:
     # Ensure shapes/dims are compatible (standardization)
     if query_rot.dim() == 1:
@@ -89,7 +92,8 @@ def turboquant_mse_score(
     eff_bits, vals_per_byte = _get_packing_params(mse_bits)
 
     out = torch.zeros((BH, N), device=query_rot.device, dtype=torch.float32)
-    BLOCK_N = 128
+    BLOCK_N = block_n if block_n else 128
+    num_warps = num_warps if num_warps else 4
     grid = (BH, triton.cdiv(N, BLOCK_N))
 
     _turboquant_mse_score_kernel[grid](
@@ -101,6 +105,7 @@ def turboquant_mse_score(
         out.stride(0), out.stride(1),
         BH, N, D, packed_d, NQ, mse_scale,
         BITS=eff_bits, VALS_PER_BYTE=vals_per_byte,
-        BLOCK_N=BLOCK_N
+        BLOCK_N=BLOCK_N,
+        num_warps=num_warps
     )
     return out

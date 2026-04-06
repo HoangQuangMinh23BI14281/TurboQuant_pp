@@ -43,19 +43,21 @@ def _turboquant_paged_fused_kernel(
     QJL_SCALE, SM_SCALE,
     QUEST_THRESHOLD,
     BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    V_GROUP_SIZE: tl.constexpr,
 ):
     pid_bh = tl.program_id(0)
     q_head_idx = pid_bh % N_HEADS
     kv_head_idx = q_head_idx // (N_HEADS // N_KV_HEADS)
     
-    d_range = tl.arange(0, 128)
+    d_range = tl.arange(0, BLOCK_D)
     d_mask = d_range < D
     
     q_rot = tl.load(Q_ROT_ptr + pid_bh * stride_qr_bh + d_range, mask=d_range < D, other=0.0).to(tl.float32)
 
     m_i = tl.zeros([1], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([1], dtype=tl.float32)
-    acc = tl.zeros([128], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     for start_n in range(0, N, BLOCK_N):
         n_range = start_n + tl.arange(0, BLOCK_N)
@@ -116,8 +118,7 @@ def _turboquant_paged_fused_kernel(
 
             # 4. Dequantize V-Cache (Group-32 resolution)
             v_idx_base = V_INDICES_ptr + LAYER_IDX * stride_v_index_l + p_id * stride_v_index_b + kv_head_idx * stride_v_index_h + slot_indices[:, None] * stride_v_index_s
-            # VÁ LỖI CỰC ĐẠI: Truy xuất đúng Scale/Zero cho TỪNG TOKEN thông qua slot_indices
-            v_met_base = V_METADATA_ptr + LAYER_IDX * stride_v_meta_l + p_id * stride_v_meta_b + kv_head_idx * stride_v_meta_h + slot_indices[:, None] * stride_v_meta_s + (d_range // 32)[None, :] * stride_v_meta_g
+            v_met_base = V_METADATA_ptr + LAYER_IDX * stride_v_meta_l + p_id * stride_v_meta_b + kv_head_idx * stride_v_meta_h + slot_indices[:, None] * stride_v_meta_s + (d_range // V_GROUP_SIZE)[None, :] * stride_v_meta_g
             
             v_scale = tl.load(v_met_base + 0 * stride_v_meta_attr)
             v_zeros = tl.load(v_met_base + 1 * stride_v_meta_attr)
@@ -199,6 +200,8 @@ def turboquant_paged_fused_attention(
     ss, ims = pool.k_summaries.stride(), pool.block_importance.stride()
     
     # print(f"[DEBUG] Paged Dispatch | context_len: {context_len}, D: {D}, BH: {BH}")
+    import math
+    BLOCK_D = 2**math.ceil(math.log2(D))
     
     grid = (BH,)
     _turboquant_paged_fused_kernel[grid](
@@ -259,8 +262,10 @@ def turboquant_paged_fused_attention(
         QJL_SCALE=qjl_scale,
         SM_SCALE=sm_scale, 
         QUEST_THRESHOLD=quest_threshold,
-        BLOCK_N=128,
-        num_warps=4
+        BLOCK_N=pool.config.triton_block_n,
+        BLOCK_D=BLOCK_D,
+        V_GROUP_SIZE=pool.config.v_group_size,
+        num_warps=pool.config.triton_num_warps
     )
     
     if D > kv_cache.head_dim:

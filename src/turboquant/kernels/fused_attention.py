@@ -25,10 +25,13 @@ def attention_score_prod_dispatch(
     quantizer: TurboQuantProd,
     qjl_scale: float,
     sm_scale: float,
+    tq_config: Optional[Any] = None,
 ) -> torch.Tensor:
     if HAS_TRITON and query.is_cuda:
         q_rot, q_sketch = quantizer.transform_query(query)
-        scores = turboquant_attention_score(q_rot, q_sketch, quantized_key, quantizer.bits - 1, qjl_scale)
+        block_n = tq_config.triton_block_n if tq_config else None
+        num_warps = tq_config.triton_num_warps if tq_config else None
+        scores = turboquant_attention_score(q_rot, q_sketch, quantized_key, quantizer.bits - 1, qjl_scale, block_n=block_n, num_warps=num_warps)
         if query.dim() > scores.dim():
             scores = scores.view(query.shape[:-1] + (scores.shape[-1],))
         return scores * sm_scale
@@ -39,11 +42,15 @@ def attention_score_mse_dispatch(
     quantized_key: MSEQuantized,
     quantizer: TurboQuantMSE,
     sm_scale: float,
+    tq_config: Optional[Any] = None,
 ) -> torch.Tensor:
     if HAS_TRITON and query.is_cuda:
         from .triton_mse import turboquant_mse_score
         q_rot = quantizer.transform_query(query)
-        scores = turboquant_mse_score(q_rot, quantized_key, quantizer.bits)
+        block_n = tq_config.triton_block_n if tq_config else None
+        num_warps = tq_config.triton_num_warps if tq_config else None
+        scores = turboquant_mse_score(q_rot, quantized_key.indices, quantized_key.norms, quantized_key.scales, 
+                                     centroids=None, mse_bits=quantizer.bits, block_n=block_n, num_warps=num_warps)
         if query.dim() > scores.dim():
             scores = scores.view(query.shape[:-1] + (scores.shape[-1],))
         return scores * sm_scale

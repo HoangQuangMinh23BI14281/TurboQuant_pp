@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from .triton_utils import _get_packing_params
+from typing import Optional
 
 @triton.jit
 def _turboquant_fused_decode_kernel(
@@ -147,6 +148,8 @@ def turboquant_fused_decode(
     qjl_scale: float,
     sm_scale: float,
     group_size: int = 128,
+    block_n: Optional[int] = None,
+    num_warps: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Hybrid Precision Fused Decode Dispatcher.
@@ -188,7 +191,8 @@ def turboquant_fused_decode(
     v_eff_bits, v_vals_per_byte = _get_packing_params(v_bits)
 
     out = torch.zeros((BH, D), device=q_rot.device, dtype=torch.float32)
-    BLOCK_N = 64
+    BLOCK_N = block_n if block_n else 64
+    num_warps = num_warps if num_warps else 4
     grid = (BH,)
 
     _turboquant_fused_decode_kernel[grid](
@@ -212,6 +216,6 @@ def turboquant_fused_decode(
         V_BITS=v_eff_bits, V_VALS_PER_BYTE=v_vals_per_byte,
         QJL_SCALE=qjl_scale, SM_SCALE=sm_scale,
         BLOCK_N=BLOCK_N,
-        num_warps=4,
+        num_warps=num_warps,
     )
     return out.to(q_rot.dtype)

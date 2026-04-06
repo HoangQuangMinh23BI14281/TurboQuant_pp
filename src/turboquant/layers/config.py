@@ -34,6 +34,8 @@ class TurboQuantConfig:
     max_seq_len: int = 4096
     v_scale_epsilon: float = 1e-6
     hardware_alignment: int = 128
+    triton_block_n: int = 128
+    triton_num_warps: int = 4
     
     # Advanced routing (Layer-specific overrides)
     sm_scale: Optional[float] = None
