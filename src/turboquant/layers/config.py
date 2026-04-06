@@ -8,8 +8,8 @@ class QuantConfig:
     Quantization-specific parameters.
     """
     k_bits: int = 5    # SOTA Default: 4-bit MSE + 1-bit Sign
-    v_bits: int = 8    # SOTA Default: High-fidelity Value
-    k_group_size: int = 128
+    v_bits: int = 3   # SOTA Default: High-fidelity Value
+    k_group_size: int = 64
     v_group_size: int = 32
     n_rotation_passes: int = 1
     qjl_scale: float = 0.1 # Calibrated SOTA Scale

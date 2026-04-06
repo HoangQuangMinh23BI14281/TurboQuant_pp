@@ -90,7 +90,7 @@ class KVBlockPool:
         )
         
         # Free list management
-        self.free_blocks = list(range(num_blocks))
+        self.free_blocks = list(range(self.num_blocks))
         self.allocated_blocks = 0
         
     def allocate_block(self) -> int:

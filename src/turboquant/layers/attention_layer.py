@@ -9,8 +9,7 @@ from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.kernels.fused_attention import turboquant_attention
 from turboquant.kernels.fused_attention import paged_turboquant_attention
 from turboquant.cache.routing import QuantizationStrategy
-from turboquant.ops.rope import RotaryPositionalEmbeddings
-from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb
+from turboquant.ops.rope import apply_rotary_pos_emb
 
 class TurboQuantAttention(nn.Module):
     """
