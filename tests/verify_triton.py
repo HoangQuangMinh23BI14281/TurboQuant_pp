@@ -4,6 +4,7 @@ import triton
 from turboquant.quant.quantizer import TurboQuantProd
 from turboquant.kernels.fused_attention import attention_score_prod
 import torch.nn.functional as F
+from turboquant.layers.config import TurboQuantConfig, QuantConfig
 
 def verify_scores():
     if not torch.cuda.is_available():
@@ -21,6 +22,8 @@ def verify_scores():
 
     # 1. Quantize (packed)
     quantized_key = q.quantize(key, pack=True)
+
+    config = TurboQuantConfig(quant=QuantConfig(k_bits=8, v_bits=3))
 
     # 2. PyTorch Reference Score (unpacked)
     # We'll temporarily force HAS_TRITON = False for the reference check

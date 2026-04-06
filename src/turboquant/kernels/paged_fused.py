@@ -262,10 +262,10 @@ def turboquant_paged_fused_attention(
         QJL_SCALE=qjl_scale,
         SM_SCALE=sm_scale, 
         QUEST_THRESHOLD=quest_threshold,
-        BLOCK_N=pool.config.triton_block_n,
+        BLOCK_N=pool.config.hw.triton_block_n,
         BLOCK_D=BLOCK_D,
-        V_GROUP_SIZE=pool.config.v_group_size,
-        num_warps=pool.config.triton_num_warps
+        V_GROUP_SIZE=pool.config.quant.v_group_size,
+        num_warps=pool.config.hw.triton_num_warps
     )
     
     if D > kv_cache.head_dim:

@@ -4,7 +4,7 @@ from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.quant.key_quantizer import TurboQuantProd
 from turboquant.quant.value_quantizer import TurboQuantValue
-from turboquant.layers.config import TurboQuantConfig
+from turboquant.layers.config import TurboQuantConfig, HardwareConfig
 
 def test_kv_manager_paged_allocation():
     num_layers = 4
@@ -14,7 +14,7 @@ def test_kv_manager_paged_allocation():
     n_heads = 8
     
     # Signature: config, head_dim, n_heads, num_blocks
-    config = TurboQuantConfig(tokens_per_block=tokens_per_block)
+    config = TurboQuantConfig(hw=HardwareConfig(tokens_per_block=tokens_per_block))
     pool = KVBlockPool(
         config=config,
         head_dim=head_dim, 
@@ -54,7 +54,7 @@ def test_kv_manager_metadata_fidelity():
     n_heads = 8
     head_dim = 256 # 2 groups of Block-128
     
-    config = TurboQuantConfig(tokens_per_block=tokens_per_block)
+    config = TurboQuantConfig(hw=HardwareConfig(tokens_per_block=tokens_per_block))
     pool = KVBlockPool(
         config=config,
         head_dim=head_dim, 
@@ -104,7 +104,7 @@ def test_kv_manager_boundary_protection():
     head_dim = 128
     n_heads = 8
     
-    config = TurboQuantConfig(tokens_per_block=tokens_per_block)
+    config = TurboQuantConfig(hw=HardwareConfig(tokens_per_block=tokens_per_block))
     pool = KVBlockPool(config, head_dim, n_heads, num_blocks)
     
     cache = TurboQuantKVCache(layer_idx=0, pool=pool)

@@ -5,7 +5,7 @@ from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.routing import LayerRouting, QuantizationStrategy
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.layers.attention_layer import TurboQuantAttention
-from turboquant.layers.config import TurboQuantConfig
+from turboquant.layers.config import TurboQuantConfig, HardwareConfig
 
 def test_fp16_paged_storage_and_gather():
     """Verify that FP16 path correctly uses raw buffers and gather logic."""
@@ -16,7 +16,7 @@ def test_fp16_paged_storage_and_gather():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Signature: config, head_dim, n_heads, num_blocks
-    config = TurboQuantConfig(tokens_per_block=tokens_per_block)
+    config = TurboQuantConfig(hw=HardwareConfig(tokens_per_block=tokens_per_block))
     pool = KVBlockPool(config=config, head_dim=head_dim, n_heads=n_heads, num_blocks=num_blocks, device=device)
     
     # Layer 0 is FP16
@@ -51,7 +51,7 @@ def test_hybrid_precision_paged_attention():
     head_dim = dim // n_heads # 64
     tokens_per_block = 16
     
-    config = TurboQuantConfig(n_head_protected=1, tokens_per_block=tokens_per_block) # Layer 0 is FP16
+    config = TurboQuantConfig(n_head_protected=1, hw=HardwareConfig(tokens_per_block=tokens_per_block)) # Layer 0 is FP16
     routing = LayerRouting(num_layers=4, exempt_layers=[0])
     pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=20, device=device)
     

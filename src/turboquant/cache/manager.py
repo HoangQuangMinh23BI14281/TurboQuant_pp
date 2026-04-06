@@ -97,11 +97,11 @@ class TurboQuantKVCache:
                 v_max = v_q_in.max(dim=-1, keepdim=True).values
                 
                 v_bits = self.pool.v_bits
-                v_scale = (v_max - v_min) / (2**v_bits - 1 + self.pool.config.quant_epsilon)
+                v_scale = (v_max - v_min) / (2**v_bits - 1 + self.pool.config.quant.quant_epsilon)
                 v_zero = v_min
-                v_scale = v_scale.clamp(min=self.pool.config.v_scale_epsilon)
+                v_scale = v_scale.clamp(min=self.pool.config.quant.v_scale_epsilon)
                 
-                v_val = ((v_q_in - v_zero) / (v_scale + self.pool.config.quant_epsilon)).round().clamp(0, 2**v_bits - 1).to(torch.uint8)
+                v_val = ((v_q_in - v_zero) / (v_scale + self.pool.config.quant.quant_epsilon)).round().clamp(0, 2**v_bits - 1).to(torch.uint8)
                 
                 # Physical Store (Value + Metadata)
                 v_flat = v_val.reshape(n_heads, -1)

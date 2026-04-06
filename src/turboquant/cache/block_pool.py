@@ -18,16 +18,16 @@ class KVBlockPool:
         n_layers: int = 24
     ):
         self.config = config
-        self.num_blocks = num_blocks if num_blocks is not None else config.num_blocks
+        self.num_blocks = num_blocks if num_blocks is not None else config.hw.num_blocks
         self.head_dim = head_dim
         self.n_heads = n_heads
-        self.tokens_per_block = config.tokens_per_block
+        self.tokens_per_block = config.hw.tokens_per_block
         self.device = device
         self.dtype = dtype
-        self.k_bits = config.k_bits
-        self.v_bits = config.v_bits
+        self.k_bits = config.quant.k_bits
+        self.v_bits = config.quant.v_bits
         self.n_layers = n_layers
-        self.v_group_size = config.v_group_size
+        self.v_group_size = config.quant.v_group_size
         
         # SOTA: Dimension Alignment (No legacy padding for small heads)
         self.padded_head_dim = head_dim
@@ -68,8 +68,7 @@ class KVBlockPool:
             dtype=torch.uint8, device=self.device
         )
         
-        # SOTA: Block-wide metadata for Value (One set per 32 tokens for high resolution)
-        self.v_group_size = 32
+        # SOTA: Block-wide metadata for Value (One set per v_group_size tokens for high resolution)
         self.num_v_groups = self.head_dim // self.v_group_size
         self.v_metadata = torch.zeros(
             # VÁ LỖI CỰC ĐẠI TẠI ĐÂY: Thêm chiều Tokens_per_block (Slot Sequence) 

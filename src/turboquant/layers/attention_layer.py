@@ -47,20 +47,20 @@ class TurboQuantAttention(nn.Module):
         # 2. Strategy-based Quantization
         strategy = tq_config.get_strategy(layer_idx, total_layers)
         self.is_protected = (strategy == QuantizationStrategy.FP16)
-        self.k_bits = tq_config.k_bits if not self.is_protected else 16
-        self.v_bits = tq_config.v_bits if not self.is_protected else 16
+        self.k_bits = tq_config.quant.k_bits if not self.is_protected else 16
+        self.v_bits = tq_config.quant.v_bits if not self.is_protected else 16
         
         if not self.is_protected:
             self.k_quantizer = TurboQuantProd(
                 self.head_dim, 
                 bits=self.k_bits, 
-                n_rotation_passes=tq_config.n_rotation_passes
+                n_rotation_passes=tq_config.quant.n_rotation_passes
             )
-            self.k_quantizer.mse_quantizer.epsilon = tq_config.quant_epsilon
+            self.k_quantizer.mse_quantizer.epsilon = tq_config.quant.quant_epsilon
             self.v_quantizer = TurboQuantValue(
                 self.head_dim, 
                 bits=self.v_bits,
-                group_size=tq_config.v_group_size
+                group_size=tq_config.quant.v_group_size
             )
         else:
             self.k_quantizer = None
@@ -138,7 +138,7 @@ class TurboQuantAttention(nn.Module):
                     kv_cache=kv_cache, 
                     k_bits=self.k_bits,
                     v_bits=self.v_bits,
-                    qjl_scale=self.tq_config.qjl_scale,
+                    qjl_scale=self.tq_config.quant.qjl_scale,
                     sm_scale=sm_scale,
                     mask=mask,
                     quest_threshold=self.tq_config.quest_threshold

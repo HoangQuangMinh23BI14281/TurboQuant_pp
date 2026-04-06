@@ -25,15 +25,22 @@ def atomic_demo():
     # This isolates the "Compass" (Position ID) sync from quantization noise.
     # SOTA: Hardened Calibration Configuration
     # Uses stable 4-bit MSE (k=5) / 8-bit Val (v=8) defaults for absolute recovery.
+    from turboquant.layers.config import QuantConfig, HardwareConfig
     tq_config = TurboQuantConfig(
-        k_bits=5,  # FIXED: Sinh ra 4-bit MSE -> Khớp hoàn hảo với dịch bit >> 4 trong bộ nhớ
-        v_bits=8,  # Giữ Value 8-bit để ưu tiên độ chính xác ngữ nghĩa
+        quant=QuantConfig(
+            k_bits=5,
+            v_bits=8,
+            k_group_size=64, # Moved from top-level group_size
+            qjl_scale=0.1,
+        ),
+        hw=HardwareConfig(
+            num_blocks=1024,
+            tokens_per_block=128,
+        ),
         protect_boundaries=True,
         n_head_protected=2, 
         n_tail_protected=2,
-        group_size=64,
-        qjl_scale=0.1, 
-        quest_threshold=-1e6  # FIXED: Chấp nhận mọi Logit âm, cấm Triton skip bừa bãi!
+        quest_threshold=-1e6
     )
     
     model = patch_hf_model(model, tq_config)

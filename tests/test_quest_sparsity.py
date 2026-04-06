@@ -3,13 +3,13 @@ import pytest
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.routing import LayerRouting
-from turboquant.layers.config import TurboQuantConfig
+from turboquant.layers.config import TurboQuantConfig, QuantConfig
 
 def test_quest_summary_consistency():
     """Verify that append() correctly updates Min/Max summaries."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     n_heads, head_dim = 4, 128
-    config = TurboQuantConfig()
+    config = TurboQuantConfig(quant=QuantConfig(k_bits=8, v_bits=3))
     pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=2, device=device)
     cache = TurboQuantKVCache(layer_idx=1, pool=pool)
     from turboquant.quant.key_quantizer import TurboQuantProd

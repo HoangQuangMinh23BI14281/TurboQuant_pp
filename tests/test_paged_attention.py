@@ -5,7 +5,7 @@ from typing import Any
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.cache.block_pool import KVBlockPool
 from turboquant.cache.routing import LayerRouting
-from turboquant.layers.config import TurboQuantConfig
+from turboquant.layers.config import TurboQuantConfig, QuantConfig, HardwareConfig
 from turboquant.quant.key_quantizer import TurboQuantProd
 from turboquant.quant.value_quantizer import TurboQuantValue
 
@@ -18,9 +18,13 @@ class TestPagedAttention:
         device = "cuda"
         head_dim = 128
         n_heads = 4
+        tokens_per_block = 16
         torch.manual_seed(42)
 
-        config = TurboQuantConfig(k_bits=k_bits, v_bits=v_bits)
+        config = TurboQuantConfig(
+            hw=HardwareConfig(tokens_per_block=tokens_per_block, triton_block_n=tokens_per_block),
+            quant=QuantConfig(k_bits=k_bits, v_bits=v_bits)
+        )
         pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=20)
         kv_cache = TurboQuantKVCache(layer_idx=1, pool=pool)
         
@@ -91,7 +95,7 @@ class TestPagedAttention:
             v_zero_exp = v_zero.repeat_interleave(pool.v_group_size, dim=-1)
             
             v_deq = v_unpacked.float() * v_scale_exp + v_zero_exp
-            v_recon_list.append(v_deq)
+            v_recon_list.append(v_deq[:, :n_tokens, :])
 
             # --- 3. QJL SIGNS RECONSTRUCTION (Từ Pool) ---
             signs_packed = pool.k_qjl[li, physical_id, :, :n_tokens] 

@@ -1,6 +1,6 @@
 import torch
 import pytest
-from turboquant.layers.config import TurboQuantConfig
+from turboquant.layers.config import TurboQuantConfig, QuantConfig
 from turboquant.layers.attention_layer import TurboQuantAttention
 
 def test_boundary_layer_protection():
@@ -9,11 +9,10 @@ def test_boundary_layer_protection():
     for head/tail layers.
     """
     config = TurboQuantConfig(
+        quant=QuantConfig(k_bits=8, v_bits=3),
         protect_boundaries=True,
         n_head_protected=2,
         n_tail_protected=2,
-        k_bits=8,
-        v_bits=3
     )
     
     total_layers = 12
@@ -41,7 +40,7 @@ def test_hybrid_precision_forward():
     Test 2: Check if forward pass works with K-8 and V-3.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    config = TurboQuantConfig(k_bits=8, v_bits=3, protect_boundaries=False)
+    config = TurboQuantConfig(quant=QuantConfig(k_bits=8, v_bits=3), protect_boundaries=False)
     
     dim = 128
     num_heads = 4
