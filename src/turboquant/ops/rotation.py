@@ -51,20 +51,30 @@ class TurboQuantRotation(nn.Module):
 
     def inverse(self, x: torch.Tensor) -> torch.Tensor:
         """
-        SRHT is orthonormal, thus its own inverse (with reversed sign order)
-        Note: Scaling is fused for 1e-15 precision parity.
+        SOTA v8.7: Shape-Robust Inverse. 
+        Tự động xử lý nếu input lớn hơn kích thước của bộ xoay.
         """
-        out = x
-        h_mat = self.wht_mat.to(device=out.device, dtype=out.dtype)
-        # Apply Fused Scale first (Inverse of the forward's final scale is the same)
-        out = out * self.final_scale.to(device=out.device, dtype=out.dtype)
+        original_shape = x.shape
         
+        # FIX: Lấy kích thước block trực tiếp từ ma trận xoay (cực kỳ an toàn)
+        block_size = self.wht_mat.shape[-1]
+        
+        # Ép về đúng (-1, block_size)
+        x_reshaped = x.contiguous().view(-1, block_size)
+        
+        out = x_reshaped
+        h_mat = self.wht_mat.to(device=out.device, dtype=out.dtype)
+        # Apply Fused Scale first
+        out = out * self.final_scale.to(device=out.device, dtype=out.dtype)
+
         for i in reversed(range(self.n_passes)):
             # 1. Hadamard matmul (Integer additions)
             out = torch.matmul(out, h_mat)
-            # 2. Sign is its own inverse (Robust to device/dtype mismatch)
+            # 2. Inverse Sign Array
             out = apply_sign_array(out, self.all_signs[i])
-        return out
+            
+        # Trả về shape ban đầu (ví dụ 128)
+        return out.view(original_shape)
 
 def apply_cascaded_srht(x: torch.Tensor, n_passes: int = 2, pattern: str = 'tbq') -> torch.Tensor:
     rot = TurboQuantRotation(x.shape[-1], n_passes=n_passes, pattern=pattern).to(x.device)

@@ -25,9 +25,9 @@ class ProdQuantized(NamedTuple):
 
 class ValueQuantized(NamedTuple):
     """Output of TurboQuantValue.quantize()."""
-    indices: torch.Tensor       # (..., dim) or (..., packed_d) packed indices
-    scales: torch.Tensor        # (..., n_groups) float scales
-    zero_points: torch.Tensor   # (..., n_groups) float zero points (min values)
+    indices: torch.Tensor       # (..., block_size) or (..., packed_d) packed indices
+    norms: torch.Tensor         # (...,) original L2 norms
+    scales: torch.Tensor        # (..., 1) dynamic RMS scales per vector
     bits: int                   # number of bits per index
     packed: bool = False        # whether data is bit-packed
 

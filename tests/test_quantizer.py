@@ -14,8 +14,8 @@ def test_mse_quantize_basic(d, bits):
 
     result = q.quantize(key, pack=False)
     assert isinstance(result, MSEQuantized)
-    assert result.indices.shape[-1] == q.block_size
-    assert result.norms.shape == (2,)
+    assert result.indices.shape[-1] == d # SOTA: Public indices match global 'd'
+    assert result.norms.shape == (2, q.n_subblocks)
     assert result.bits == bits
 
     # Indices in valid range
@@ -30,7 +30,7 @@ def test_mse_roundtrip(d, bits):
     key = torch.randn(4, d)
 
     reconstructed = q(key)  # forward = quantize + dequantize
-    assert reconstructed.shape == key.shape
+    assert reconstructed.shape == (4, d)
 
     cos_sim = torch.nn.functional.cosine_similarity(key, reconstructed, dim=-1)
     assert cos_sim.mean().item() > 0.9, f"cos_sim={cos_sim.mean().item():.4f} too low for d={d}, bits={bits}"
@@ -47,10 +47,10 @@ def test_prod_quantize_flow(d, bits):
 
     result = q.quantize(key, pack=False)
     assert isinstance(result, ProdQuantized)
-    assert result.mse_indices.shape[-1] == q.block_size
-    assert result.qjl_signs.shape[-1] == q.block_size
-    assert result.residual_norms.shape == (1,)
-    assert result.norms.shape == (1,)
+    assert result.mse_indices.shape[-1] == d # SOTA: Public indices match global 'd'
+    assert result.qjl_signs.shape[-1] == d    # SOTA: Public indices match global 'd'
+    assert result.residual_norms.shape == (1, q.n_subblocks)
+    assert result.norms.shape == (1, q.n_subblocks)
     assert result.mse_bits == bits - 1
 
     # MSE indices in valid range
@@ -71,9 +71,9 @@ def test_prod_quantize_packed():
     assert result.packed is True
     
     # MSE bits = 3 -> 2 values per byte
-    assert result.mse_indices.shape[-1] == q.block_size // 2
+    assert result.mse_indices.shape[-1] == d // 2
     # QJL bits = 1 -> 8 values per byte
-    assert result.qjl_signs.shape[-1] == q.block_size // 8
+    assert result.qjl_signs.shape[-1] == d // 8
     assert result.mse_indices.dtype == torch.uint8
     assert result.qjl_signs.dtype == torch.uint8
 
@@ -149,10 +149,10 @@ def test_prod_broadcasting():
     key = torch.randn(2, 4, d)  # (batch, seq, dim)
     result = q.quantize(key, pack=False)
 
-    assert result.mse_indices.shape == (2, 4, q.block_size)
-    assert result.norms.shape == (2, 4)
-    assert result.qjl_signs.shape == (2, 4, q.block_size)
-    assert result.residual_norms.shape == (2, 4)
+    assert result.mse_indices.shape == (2, 4, d)
+    assert result.norms.shape == (2, 4, q.n_subblocks)
+    assert result.qjl_signs.shape == (2, 4, d)
+    assert result.residual_norms.shape == (2, 4, q.n_subblocks)
 
 
 def test_mse_broadcasting():
@@ -164,8 +164,8 @@ def test_mse_broadcasting():
     key = torch.randn(2, 4, d)  # (batch, seq, dim)
     result = q.quantize(key, pack=False)
 
-    assert result.indices.shape == (2, 4, q.block_size)
-    assert result.norms.shape == (2, 4)
+    assert result.indices.shape == (2, 4, d)
+    assert result.norms.shape == (2, 4, q.n_subblocks)
 
 
 # ─── Quality Comparison Tests ────────────────────────────────────────

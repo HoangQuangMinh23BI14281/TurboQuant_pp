@@ -19,7 +19,6 @@ class TurboQuantKVCache:
         self.n_kv_heads = pool.n_heads # SOTA Alias for dispatcher
         self.head_dim = pool.head_dim
         self.is_compileable = False
-        self.is_compileable = False
         # Block Management
         self.block_ids: List[int] = []
         self.num_tokens = 0
@@ -28,8 +27,9 @@ class TurboQuantKVCache:
         self.k_quantizer: Optional[TurboQuantProd] = None
         self.v_quantizer: Optional[Any] = None
         
-        # Forensic Diagnostic: Key signal audit
-        self.k_mean_abs = 0.0
+        # SOTA v8.6: Centroid Caching (Zero-Sync Dispatch)
+        self.k_centroids: Optional[torch.Tensor] = None
+        self.v_centroids: Optional[torch.Tensor] = None
         
         # SOTA Pillar 3: FP16 Hybrid Support (Exempt Strategy)
         self.k_fp16: Dict[int, torch.Tensor] = {}
@@ -69,64 +69,65 @@ class TurboQuantKVCache:
             # 2. Append to Physical Pool with Layer Isolation (Quantized Path)
             if self.k_quantizer is not None:
                 current_block_id = self.block_ids[-1]
-                
+
                 # SOTA Pillar 1: Key Quantization (MSE + Sign)
                 k_in = k[:, :, i:i+1, :]
                 v_in = v[:, :, i:i+1, :]
-                
+
                 k_q = self.k_quantizer.quantize(k_in)
-                
+
                 # Physical Store (Layer-Aware Mapping)
                 li = self.layer_idx
-                self.pool.k_indices[li, current_block_id, :, slot_offset].copy_(k_q.mse_indices.reshape(n_heads, -1))
-                self.pool.k_qjl[li, current_block_id, :, slot_offset].copy_(k_q.qjl_signs.reshape(n_heads, -1))
-                
-                # 3. SOTA Pillar 2: Key Metadata (Per-Slot Dynamic Range Sync)
-                self.pool.k_metadata[li, current_block_id, :, slot_offset, 0].copy_(k_q.norms.flatten())
-                self.pool.k_metadata[li, current_block_id, :, slot_offset, 1].copy_(k_q.scales.flatten())
-                
-                pre_res_norms = k_q.residual_norms if hasattr(k_q, "residual_norms") else None
-                if pre_res_norms is not None:
-                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].copy_(pre_res_norms.to(self.device).flatten())
-                else:
-                    self.pool.k_metadata[li, current_block_id, :, slot_offset, 2].fill_(0.0)
+                indices_flat = k_q.mse_indices.reshape(n_heads, -1)
+                packed_bytes = indices_flat.shape[-1]
+                self.pool.k_indices[li, current_block_id, :, slot_offset, :packed_bytes].copy_(indices_flat)
 
-                # 4. SOTA Pillar 2: Asymmetric Value Quantization (Group-32 resolution)
-                v_q_in = v_in.squeeze(0).reshape(n_heads, self.pool.num_v_groups, self.pool.v_group_size)
-                v_min = v_q_in.min(dim=-1, keepdim=True).values
-                v_max = v_q_in.max(dim=-1, keepdim=True).values
+                signs_flat = k_q.qjl_signs.reshape(n_heads, -1)
+                qjl_bytes = signs_flat.shape[-1]
+                self.pool.k_qjl[li, current_block_id, :, slot_offset, :qjl_bytes].copy_(signs_flat)    
+
+                # 3. SOTA Pillar 2: Key Metadata (Sub-block Interleaving v8.6)
+                res_norms = k_q.residual_norms if hasattr(k_q, "residual_norms") else torch.zeros_like(k_q.norms)
+                k_meta_interleaved = torch.stack([k_q.norms, k_q.scales, res_norms], dim=-1) # (H, n_sub, 3)
+
+                li = self.layer_idx
+                self.pool.k_metadata[li, current_block_id, :, slot_offset, :].copy_(k_meta_interleaved.reshape(n_heads, -1))
+
+                # 4. SOTA Pillar 2: SRHT-MSE Value Quantization (Sub-block v8.6)
+                v_q = self.v_quantizer.quantize(v_in)
+
+                v_indices_flat = v_q.indices.reshape(n_heads, -1)
+                v_bytes = v_indices_flat.shape[-1]
+                self.pool.v_indices[li, current_block_id, :, slot_offset, :v_bytes].copy_(v_indices_flat)
+
+                v_meta_interleaved = torch.stack([v_q.norms, v_q.scales], dim=-1) # (H, n_sub, 2)       
+                self.pool.v_metadata[li, current_block_id, :, slot_offset, :].copy_(v_meta_interleaved.reshape(n_heads, -1))
                 
-                v_bits = self.pool.v_bits
-                v_scale = (v_max - v_min) / (2**v_bits - 1 + self.pool.config.quant.quant_epsilon)
-                v_zero = v_min
-                v_scale = v_scale.clamp(min=self.pool.config.quant.v_scale_epsilon)
+                # 5. SOTA: Update block-level summaries for Quest
+                # FIX 128 vs 64: Ép shape về đúng block_size trước khi xoay
+                bsz = self.k_quantizer.mse_quantizer.block_size
+                n_subblocks = self.k_quantizer.mse_quantizer.n_subblocks
                 
-                v_val = ((v_q_in - v_zero) / (v_scale + self.pool.config.quant.quant_epsilon)).round().clamp(0, 2**v_bits - 1).to(torch.uint8)
+                temp_k = k_in.float() # (1, H, 1, D)
+                temp_k_reshaped = temp_k.contiguous().view(-1, bsz)
                 
-                # Physical Store (Value + Metadata)
-                v_flat = v_val.reshape(n_heads, -1)
-                from turboquant.quant.quant_base import pack_indices
-                v_pack = pack_indices(v_flat, v_bits) if v_bits < 8 else v_flat.to(torch.uint8)
+                k_rotated_reshaped = self.k_quantizer.mse_quantizer.rotation(temp_k_reshaped).clone()
+                k_rotated = k_rotated_reshaped.view(1, n_heads, 1, n_subblocks, bsz)
                 
-                self.pool.v_indices[li, current_block_id, :, slot_offset].copy_(v_pack)
-                self.pool.v_metadata[li, current_block_id, :, slot_offset, :, 0].copy_(v_scale.squeeze(-1))
-                self.pool.v_metadata[li, current_block_id, :, slot_offset, :, 1].copy_(v_zero.squeeze(-1))
+                # SOTA FIX: Tính max của trị tuyệt đối (đỉnh WHT) TRÊN TỪNG SUBBLOCK
+                k_rotated_max_sub = torch.max(torch.abs(k_rotated), dim=-1).values # (1, H, 1, n_sub)
+                k_rotated_summary = k_rotated_max_sub.squeeze(0).squeeze(-2) # (H, n_sub)
                 
-                # SOTA: Update block-level summaries for Quest
-                # Ép kiểu float() và clone() để đảm bảo an toàn bộ nhớ
-                k_rotated = self.k_quantizer.mse_quantizer.rotation(k_in.squeeze(0).squeeze(1).float()).clone()
-                
-                # SỬA LỖI IN-PLACE: Phải dùng copy_() thay vì toán tử = 
-                # để đảm bảo dữ liệu ghi thẳng vào VRAM vật lý của Pool.
+                # Cập nhật vào Pool (giờ pool chứa đúng số n_sub thay vì head_dim)
                 if slot_offset == 0:
-                    self.pool.k_summaries[li, current_block_id, :, 0].copy_(k_rotated)
-                    self.pool.k_summaries[li, current_block_id, :, 1].copy_(k_rotated)
+                    self.pool.k_summaries[li, current_block_id, :, 0].copy_(k_rotated_summary)
+                    self.pool.k_summaries[li, current_block_id, :, 1].copy_(k_rotated_summary)
                 else:
                     self.pool.k_summaries[li, current_block_id, :, 0].copy_(
-                        torch.min(self.pool.k_summaries[li, current_block_id, :, 0], k_rotated)
+                        torch.min(self.pool.k_summaries[li, current_block_id, :, 0], k_rotated_summary)
                     )
                     self.pool.k_summaries[li, current_block_id, :, 1].copy_(
-                        torch.max(self.pool.k_summaries[li, current_block_id, :, 1], k_rotated)
+                        torch.max(self.pool.k_summaries[li, current_block_id, :, 1], k_rotated_summary)
                     )
 
             # Update count

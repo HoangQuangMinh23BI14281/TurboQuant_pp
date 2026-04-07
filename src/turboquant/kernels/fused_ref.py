@@ -28,12 +28,14 @@ def attention_score_prod(
 ) -> torch.Tensor:
     """
     Standard PyTorch reference for Asymmetric QJL estimator scores.
+    SOTA v8.6.11: Sub-block aware reference path.
     """
     if scale is None:
         scale = 1.0 / math.sqrt(quantizer.dim)
-
+ 
     dim = quantizer.dim
     block_size = quantizer.block_size
+    n_subblocks = quantizer.n_subblocks
     
     # Term 1: MSE part
     mse_q = MSEQuantized(
@@ -43,31 +45,40 @@ def attention_score_prod(
         bits=quantized_key.mse_bits,
         packed=quantized_key.packed,
     )
+    # TurboQuantMSE.dequantize is already sub-block aware
     keys_mse = quantizer.mse_quantizer.dequantize(mse_q)
     scores_mse = torch.matmul(query.float(), keys_mse.float().transpose(-2, -1))
-
+ 
     # Term 2: QJL correction
-    q_rotated, q_qjl_projected = quantizer.transform_query(query)
+    q_rot, q_qjl_projected = quantizer.transform_query(query)
     
     k_qjl_signs = quantized_key.qjl_signs
     if quantized_key.packed:
-        k_qjl_signs = unpack_indices(k_qjl_signs, 1, block_size)
+        k_qjl_signs = unpack_indices(k_qjl_signs, 1, block_size * n_subblocks)
     
-    sign_float = k_qjl_signs.float() * 2.0 - 1.0 # (n_k, d) or (batch, heads, n_k, d)
+    sign_float = k_qjl_signs.float() * 2.0 - 1.0 # (..., n_k, d)
     
-    # Matching Triton accumulation: Dot(Sketch_Q, Signs_K)
-    # q_qjl_projected: (..., n_q, d)
-    # sign_float: (..., n_k, d)
-    qjl_dot = torch.matmul(q_qjl_projected.to(torch.float32), sign_float.transpose(-1, -2).to(torch.float32))
+    # Reshape for sub-block dot products: (..., n_subblocks, block_size)
+    q_reshaped = q_qjl_projected.float().view(*q_qjl_projected.shape[:-1], n_subblocks, block_size)
+    k_signs_reshaped = sign_float.float().view(*sign_float.shape[:-1], n_subblocks, block_size)
+    
+    # Calculate dot product per sub-block: (..., n_q, n_k, n_subblocks)
+    # We want q_reshaped[..., q_idx, sub_idx, :] dot k_signs_reshaped[..., k_idx, sub_idx, :]
+    # (..., n_q, sub, block) @ (..., n_k, sub, block).T
+    # Easier: (..., n_q, sub, block) * (..., n_k, sub, block) and sum over block
+    q_unsqueezed = q_reshaped.unsqueeze(-3) # (..., n_q, 1, sub, block)
+    k_unsqueezed = k_signs_reshaped.unsqueeze(-4) # (..., 1, n_k, sub, block)
+    
+    qjl_dot_sub = (q_unsqueezed * k_unsqueezed).sum(dim=-1) # (..., n_q, n_k, n_subblocks)
     
     # SOTA: Factor = sqrt(2.0/pi) / sqrt(block_size). 
-    # This factor matches TurboQuantProd and the Triton kernel exactly.
     qjl_factor = math.sqrt(2.0 / math.pi) / math.sqrt(block_size)
     
-    # Broadcast residual norms correctly
-    # quantized_key.residual_norms: (..., n_k)
-    res_norms = quantized_key.residual_norms.unsqueeze(-2) # (..., 1, n_k)
+    # Apply sub-block residual norms correctly: (..., n_k, n_subblocks)
+    res_norms = quantized_key.residual_norms # (..., n_k, n_subblocks)
     
-    scores_qjl = qjl_factor * qjl_dot * res_norms
-
+    # Scores QJL: qjl_factor * sum_over_subblocks(dot_sub * res_norms)
+    scores_qjl_sub = qjl_factor * qjl_dot_sub * res_norms.unsqueeze(-3)
+    scores_qjl = scores_qjl_sub.sum(dim=-1)
+ 
     return (scores_mse + scores_qjl) * scale

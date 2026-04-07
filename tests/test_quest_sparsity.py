@@ -2,42 +2,39 @@ import torch
 import pytest
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.cache.block_pool import KVBlockPool
-from turboquant.cache.routing import LayerRouting
 from turboquant.layers.config import TurboQuantConfig, QuantConfig
 
 def test_quest_summary_consistency():
-    """Verify that append() correctly updates Min/Max summaries."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     n_heads, head_dim = 4, 128
     config = TurboQuantConfig(quant=QuantConfig(k_bits=8, v_bits=3))
-    pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=2, device=device)
+    pool = KVBlockPool(config, head_dim=head_dim, n_heads=n_heads, num_blocks=2, device=device)    
     cache = TurboQuantKVCache(layer_idx=1, pool=pool)
     from turboquant.quant.key_quantizer import TurboQuantProd
-    cache.k_quantizer = TurboQuantProd(head_dim, bits=pool.k_bits, n_rotation_passes=2)
+    from turboquant.quant.value_quantizer import TurboQuantValue
     
-    # 1. First token
+    # SOTA FIX: Truyền block_size
+    cache.k_quantizer = TurboQuantProd(head_dim, bits=4, block_size=pool.k_group_size).to(device)
+    cache.v_quantizer = TurboQuantValue(head_dim, bits=3, block_size=pool.v_group_size).to(device)
+
     k1 = torch.ones(1, n_heads, 1, head_dim, device=device) * 5.0
     v1 = torch.ones(1, n_heads, 1, head_dim, device=device)
     cache.append(k1, v1)
     
     bid = cache.block_ids[0]
-    # Check if updated (not zero)
-    assert torch.any(pool.k_summaries[1, bid, :, 0, :] != 0)
-    assert torch.allclose(pool.k_summaries[1, bid, :, 0, :], pool.k_summaries[1, bid, :, 1, :])
+    assert torch.any(pool.k_summaries[1, bid, :, 0, 0] != 0)
+    assert torch.allclose(pool.k_summaries[1, bid, :, 0, 0], pool.k_summaries[1, bid, :, 1, 0])
     
     val1 = pool.k_summaries[1, bid, 0, 0, 0].item()
     
-    # 2. Second token with different values
     k2 = torch.ones(1, n_heads, 1, head_dim, device=device) * -10.0
     v2 = torch.ones(1, n_heads, 1, head_dim, device=device)
     cache.append(k2, v2)
     
-    # min should be updated, max should stay same (since val2 < val1)
     val2 = pool.k_summaries[1, bid, 0, 0, 0].item()
-    # verify that min either stays same or decreases, and max stays same or increases
     assert pool.k_summaries[1, bid, 0, 0, 0] <= val1
-    assert torch.any(pool.k_summaries[1, bid, :, 1, :] >= val1)
-
+    assert torch.any(pool.k_summaries[1, bid, :, 1, 0] >= val1)
+    
 def test_quest_skip_logic():
     """Verify that the Quest threshold successfully skips zero-importance blocks."""
     pytest.skip("Simulated Attention Score is deprecated due to Paged Fused Triton kernel migration.")

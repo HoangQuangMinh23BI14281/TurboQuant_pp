@@ -2,7 +2,7 @@ import torch
 import math
 import pytest
 import numpy as np
-from turboquant.quant.key_quantizer import TurboQuantProd, TurboQuantMSE
+from turboquant.quant.key_quantizer import TurboQuantMSE
 from turboquant.quant.value_quantizer import TurboQuantValue
 from turboquant.quant.lloyd_max import lloyd_max_quantize, lloyd_max_dequantize
 
@@ -15,47 +15,49 @@ def calculate_snr(original: torch.Tensor, reconstructed: torch.Tensor) -> float:
 
 @pytest.mark.parametrize("dim", [128, 256])
 @pytest.mark.parametrize("bits", [3, 4])
-def test_dual_lut_snr_gain(dim, bits):
+def test_v_srht_snr_gain(dim, bits):
     """
-    TRA TẤN CỰC HẠN: Proving the SNR gain of Dual-LUT (Laplace) over Shared-LUT (Gaussian).
-    For non-rotated Value (V) cache, Laplacian distribution is a superior prior.
+    TRA TẤN CỰC HẠN: Proving the SNR gain of SRHT-MSE over legacy Linear Quantization.
+    SRHT (WHT) eliminates the 'outlier effect' in Value vectors, allowing MSE to be more effective.
     """
     torch.manual_seed(42)
-    # Variance of standard Gaussian LUT is 1/dim.
-    # To match this, Laplace needs b = 1/sqrt(2*dim).
-    b_true = 1.0 / math.sqrt(2 * dim)
-    dist = torch.distributions.laplace.Laplace(0, b_true)
-    x = dist.sample((100, dim))
+    x = torch.randn(10, dim)
+    # Simulate spiky V (common in LLMs)
+    x[:, :4] *= 10.0 
     
-    # 1. SHARED-LUT (SIMULATION): Using Gaussian for Value
-    indices_shared = lloyd_max_quantize(x, bits, dim, dist='gaussian')
-    x_hat_shared = lloyd_max_dequantize(indices_shared, bits, dim, dist='gaussian')
-    snr_shared = calculate_snr(x, x_hat_shared)
+    # 1. LEGACY: Linear Asymmetric Quantization (Simulated)
+    # Manual min/max quantization for bits
+    x_min = x.min(dim=-1, keepdim=True).values
+    x_max = x.max(dim=-1, keepdim=True).values
+    scale = (x_max - x_min) / (2**bits - 1)
+    q_indices = ((x - x_min) / (scale + 1e-8)).round().clamp(0, 2**bits - 1)
+    x_hat_linear = q_indices * scale + x_min
+    snr_linear = calculate_snr(x, x_hat_linear)
     
-    # 2. DUAL-LUT (SOTA): Using Laplace for Value
-    indices_dual = lloyd_max_quantize(x, bits, dim, dist='laplace')
-    x_hat_dual = lloyd_max_dequantize(indices_dual, bits, dim, dist='laplace')
-    snr_dual = calculate_snr(x, x_hat_dual)
+    # 2. SOTA: SRHT-MSE (TurboQuantValue)
+    q_v = TurboQuantValue(dim, bits=bits, n_rotation_passes=1)
+    res = q_v.quantize(x)
+    x_hat_srht = q_v.dequantize(res)
+    snr_srht = calculate_snr(x, x_hat_srht)
     
-    gain = snr_dual - snr_shared
+    gain = snr_srht - snr_linear
     print(f"\n[SOTA AUDIT] Dim={dim}, Bits={bits}")
-    print(f"  Shared-LUT (Gaussian) SNR: {snr_shared:.2f} dB")
-    print(f"  Dual-LUT (Laplacian) SNR: {snr_dual:.2f} dB")
+    print(f"  Legacy Linear SNR: {snr_linear:.2f} dB")
+    print(f"  SOTA SRHT-MSE SNR: {snr_srht:.2f} dB")
     print(f"  SNR GAIN: {gain:.2f} dB")
     
-    # Assert gain is significant (target: ~1.2dB)
-    # Even on standard randn, Laplace gain is observable. 
-    # On real heavy-tailed data, it's 1.2dB+.
-    assert gain > 0.5, f"Dual-LUT gain {gain:.2f}dB is too low for SOTA standard"
+    # Assert gain is positive and significant. 
+    # For spiky data, SRHT-MSE is often >2dB better.
+    assert gain > 1.0, f"SRHT-MSE gain {gain:.2f}dB is too low. Check rotation logic."
 
-def test_block_128_compression_audit():
-    """Verify that Block-128 is correctly enforced for SOTA compression."""
+def test_v_cache_block_alignment():
+    """Verify that Value Cache uses per-vector Norm/Scale (SOTA v8.5)."""
     dim = 256
-    q_v = TurboQuantValue(dim, group_size=128)
-    assert q_v.group_size == 128
-    assert q_v.n_groups == 2 # 256 / 128
-    
+    q_v = TurboQuantValue(dim, bits=3)
     x = torch.randn(5, dim)
     result = q_v.quantize(x)
-    assert result.scales.shape == (5, 2), "Incorrect scale metadata shape for Block-128"
-    assert result.zero_points.shape == (5, 2), "Incorrect zero_point metadata shape for Block-128"
+    
+    # Metadata should be per-vector (batch, 1)
+    assert result.norms.shape == (5, 1)
+    assert result.scales.shape == (5, 1)
+    assert hasattr(result, "indices")

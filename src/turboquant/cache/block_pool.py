@@ -9,7 +9,7 @@ class KVBlockPool:
     """
     def __init__(
         self,
-        config, # TurboQuantConfig (Pass Any to avoid circular import)
+        config, 
         head_dim: int,
         n_heads: int,
         num_blocks: Optional[int] = None,
@@ -27,69 +27,39 @@ class KVBlockPool:
         self.k_bits = config.quant.k_bits
         self.v_bits = config.quant.v_bits
         self.n_layers = n_layers
-        self.v_group_size = config.quant.v_group_size
         
-        # SOTA: Dimension Alignment (No legacy padding for small heads)
+        # FIX TỐI THƯỢNG: ÉP cứng group_size bằng 64 để đồng bộ tuyệt đối với logic bên trong TurboQuantMSE (trừ khi nó bị force bé hơn)
+        self.k_group_size = min(64, int(2 ** math.ceil(math.log2(head_dim)))) if head_dim > 0 else 1
+        self.v_group_size = self.k_group_size 
+        
         self.padded_head_dim = head_dim
         
-        # 1. Calculated Buffer Sizes (Dynamic based on packing logic)
-        # Key Indices (MSE): vals_per_byte = 8 // (bits-1)
         k_mse_bits = max(1, self.k_bits - 1)
         k_vals_per_byte = 8 // k_mse_bits
-        self.k_idx_bytes = self.head_dim // k_vals_per_byte
         
-        # Key QJL Signs: 1-bit packed (8 items per byte)
-        self.k_qjl_bytes = self.head_dim // 8
+        self.k_subblocks = math.ceil(self.head_dim / self.k_group_size)
+        self.v_subblocks = math.ceil(self.head_dim / self.v_group_size)
         
-        # Value Indices: vals_per_byte = 8 // bits
+        k_padded_dim = self.k_subblocks * self.k_group_size
+        v_padded_dim = self.v_subblocks * self.v_group_size
+        
+        self.k_idx_bytes = k_padded_dim // k_vals_per_byte
+        self.k_qjl_bytes = k_padded_dim // 8
+        
         v_vals_per_byte = 8 // self.v_bits
-        self.v_idx_bytes = self.head_dim // v_vals_per_byte
+        self.v_idx_bytes = v_padded_dim // v_vals_per_byte
         
-        # 2. Static Pre-allocation
-        # Key Physical Storage
-        self.k_indices = torch.zeros(
-            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.k_idx_bytes), 
-            dtype=torch.uint8, device=self.device
-        )
-        self.k_qjl = torch.zeros(
-            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.k_qjl_bytes), 
-            dtype=torch.uint8, device=self.device
-        )
+        self.k_indices = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.k_idx_bytes), dtype=torch.uint8, device=self.device)
+        self.k_qjl = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.k_qjl_bytes), dtype=torch.uint8, device=self.device)
         
-        # Key Metadata: (norm, scale, residual_norm) per SLOT (SOTA Pillar 2: Dynamic Range Sync)
-        self.k_metadata = torch.zeros(
-            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, 3), 
-            dtype=torch.float32, device=self.device
-        )
+        # Cấp phát chắc chắn 3 tham số nhân với số subblocks
+        self.k_metadata = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, 3 * self.k_subblocks), dtype=torch.float32, device=self.device)
         
-        # Value Physical Storage
-        self.v_indices = torch.zeros(
-            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.v_idx_bytes),
-            dtype=torch.uint8, device=self.device
-        )
+        self.v_indices = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.v_idx_bytes), dtype=torch.uint8, device=self.device)
+        self.v_metadata = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, 2 * self.v_subblocks), dtype=torch.float32, device=self.device)
         
-        # SOTA: Block-wide metadata for Value (One set per v_group_size tokens for high resolution)
-        self.num_v_groups = self.head_dim // self.v_group_size
-        self.v_metadata = torch.zeros(
-            # VÁ LỖI CỰC ĐẠI TẠI ĐÂY: Thêm chiều Tokens_per_block (Slot Sequence) 
-            (self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.num_v_groups, 2), # (Scale, Zero) per Group, per Token
-            dtype=torch.float32, device=self.device
-        )
+        self.k_summaries = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, 2, self.k_subblocks), dtype=torch.float32, device=self.device)
         
-        # 3. Quest & H2O Accelerators
-        # k_summaries: (n_layers, num_blocks, n_heads, 2, padded_head_dim) -> [min, max] for block-level Quest skipping
-        # SOTA: summaries must match the Rotated Domain (padded to 128)
-        self.k_summaries = torch.zeros(
-            (self.n_layers, self.num_blocks, self.n_heads, 2, self.padded_head_dim),
-            dtype=torch.float32, device=self.device
-        )
-        # block_importance: (n_layers, num_blocks, n_heads) -> Cumulative Softmax score for H2O eviction
-        self.block_importance = torch.zeros(
-            (self.n_layers, self.num_blocks, self.n_heads),
-            dtype=torch.float32, device=self.device
-        )
-        
-        # Free list management
         self.free_blocks = list(range(self.num_blocks))
         self.allocated_blocks = 0
         
@@ -116,4 +86,3 @@ class KVBlockPool:
         self.v_indices.zero_()
         self.v_metadata.zero_()
         self.k_summaries.zero_()
-        self.block_importance.zero_()

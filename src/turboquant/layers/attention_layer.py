@@ -50,17 +50,20 @@ class TurboQuantAttention(nn.Module):
         self.v_bits = tq_config.quant.v_bits if not self.is_protected else 16
         
         if not self.is_protected:
+            # FIX: Bỏ tham số block_size đi. Các Quantizer giờ đã SOTA tự động nội suy (default 64)
             self.k_quantizer = TurboQuantProd(
                 self.head_dim, 
                 bits=self.k_bits, 
                 n_rotation_passes=tq_config.quant.n_rotation_passes
             )
             self.k_quantizer.mse_quantizer.epsilon = tq_config.quant.quant_epsilon
+            
             self.v_quantizer = TurboQuantValue(
                 self.head_dim, 
                 bits=self.v_bits,
-                group_size=tq_config.quant.v_group_size
+                n_rotation_passes=tq_config.quant.n_rotation_passes
             )
+            self.v_quantizer.mse_quantizer.epsilon = tq_config.quant.quant_epsilon
         else:
             self.k_quantizer = None
             self.v_quantizer = None
@@ -119,7 +122,13 @@ class TurboQuantAttention(nn.Module):
             
             if seq_q > 1:
                 # 2.1 Prefill Path: Hardware-accelerated SDPA
-                k_full, v_full = k, v
+                # SOTA v8.5 Fidelity Alignment: Quantize input during prefill for parity
+                if not self.is_protected:
+                    k_full = self.k_quantizer(k) if self.k_quantizer else k
+                    v_full = self.v_quantizer(v) if self.v_quantizer else v
+                else:
+                    k_full, v_full = k, v
+                
                 if self.num_heads != self.num_kv_heads:
                     k_full = k_full.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
                     v_full = v_full.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
@@ -131,6 +140,12 @@ class TurboQuantAttention(nn.Module):
                 )
             else:
                 # 2.2 Decode Path: Paged Triton Kernel
+                # SOTA v8.6: Zero-Sync Centroid Dispatch
+                if kv_cache.k_centroids is None and not self.is_protected:
+                    from ..kernels.paged_fused import compute_centroids
+                    kv_cache.k_centroids = compute_centroids(self.k_bits - 1, dist='gaussian').to(q.device, q.dtype)
+                    kv_cache.v_centroids = compute_centroids(self.v_bits, dist='gaussian').to(q.device, q.dtype)
+                
                 sm_scale = self.tq_config.sm_scale if self.tq_config.sm_scale is not None else 1.0 / (self.head_dim ** 0.5)
                 out = paged_turboquant_attention(
                     query=q, 
@@ -140,6 +155,8 @@ class TurboQuantAttention(nn.Module):
                     qjl_scale=self.tq_config.quant.qjl_scale,
                     sm_scale=sm_scale,
                     mask=mask,
+                    k_centroids=kv_cache.k_centroids,
+                    v_centroids=kv_cache.v_centroids,
                     quest_threshold=self.tq_config.quest_threshold
                 )
         else:

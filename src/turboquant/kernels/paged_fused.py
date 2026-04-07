@@ -19,19 +19,17 @@ def _turboquant_paged_fused_kernel(
     Q_ROT_ptr,
     K_INDICES_ptr, K_SIGNS_ptr, K_METADATA_ptr,
     V_INDICES_ptr, V_METADATA_ptr,
-    K_CENTROIDS_ptr,
+    K_CENTROIDS_ptr, V_CENTROIDS_ptr,
     BLOCK_TABLE_ptr,
     K_SUMMARIES_ptr,        # Quest: Min/Max per block
-    BLOCK_IMPORTANCE_ptr,   # H2O: Cumulative scores
     OUT_ptr,
     LAYER_IDX,
     stride_k_index_l, stride_k_index_b, stride_k_index_h, stride_k_index_s, stride_k_index_d,
     stride_k_signs_l, stride_k_signs_b, stride_k_signs_h, stride_k_signs_s, stride_k_signs_d,
     stride_k_meta_l, stride_k_meta_b, stride_k_meta_h, stride_k_meta_s, stride_k_meta_attr,
     stride_v_index_l, stride_v_index_b, stride_v_index_h, stride_v_index_s, stride_v_index_d,
-    stride_v_meta_l, stride_v_meta_b, stride_v_meta_h, stride_v_meta_s, stride_v_meta_g, stride_v_meta_attr,
+    stride_v_meta_l, stride_v_meta_b, stride_v_meta_h, stride_v_meta_s, stride_v_meta_attr,
     stride_sum_l, stride_sum_b, stride_sum_h, stride_sum_attr, stride_sum_d,
-    stride_imp_l, stride_imp_b, stride_imp_h,
     stride_qr_bh, stride_qr_d,
     stride_o_bh, stride_o_d,
     N, D,
@@ -41,10 +39,9 @@ def _turboquant_paged_fused_kernel(
     N_KV_HEADS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     QJL_SCALE, SM_SCALE,
-    QUEST_THRESHOLD,
+    QUEST_THRESHOLD, V_SPARSE_THRESHOLD,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
-    V_GROUP_SIZE: tl.constexpr,
 ):
     pid_bh = tl.program_id(0)
     q_head_idx = pid_bh % N_HEADS
@@ -53,7 +50,7 @@ def _turboquant_paged_fused_kernel(
     d_range = tl.arange(0, BLOCK_D)
     d_mask = d_range < D
     
-    q_rot = tl.load(Q_ROT_ptr + pid_bh * stride_qr_bh + d_range, mask=d_range < D, other=0.0).to(tl.float32)
+    q_rot = tl.load(Q_ROT_ptr + pid_bh * stride_qr_bh + d_range, mask=d_mask, other=0.0).to(tl.float32)
 
     m_i = tl.zeros([1], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([1], dtype=tl.float32)
@@ -113,24 +110,30 @@ def _turboquant_paged_fused_kernel(
             alpha = tl.exp(m_i - m_new)
             p = tl.exp(scores - m_new)
             
-            # Importance Accumulation for H2O Eviction
-            tl.atomic_add(BLOCK_IMPORTANCE_ptr + LAYER_IDX * stride_imp_l + pb_id * stride_imp_b + kv_head_idx * stride_imp_h, tl.sum(p))
-
-            # 4. Dequantize V-Cache (Group-32 resolution)
-            v_idx_base = V_INDICES_ptr + LAYER_IDX * stride_v_index_l + p_id * stride_v_index_b + kv_head_idx * stride_v_index_h + slot_indices[:, None] * stride_v_index_s
-            v_met_base = V_METADATA_ptr + LAYER_IDX * stride_v_meta_l + p_id * stride_v_meta_b + kv_head_idx * stride_v_meta_h + slot_indices[:, None] * stride_v_meta_s + (d_range // V_GROUP_SIZE)[None, :] * stride_v_meta_g
+            # 2. Sparse V-Fetch (SOTA v8.5)
+            # Skip V-dequant if this block has no significant overlap with Query
+            if tl.max(p) > V_SPARSE_THRESHOLD:
+                # 4. Dequantize V-Cache (SRHT-MSE Model)
+                v_idx_base = V_INDICES_ptr + LAYER_IDX * stride_v_index_l + p_id * stride_v_index_b + kv_head_idx * stride_v_index_h + slot_indices[:, None] * stride_v_index_s
+                v_met_base = V_METADATA_ptr + LAYER_IDX * stride_v_meta_l + p_id * stride_v_meta_b + kv_head_idx * stride_v_meta_h + slot_indices[:, None] * stride_v_meta_s
+                
+                vn = tl.load(v_met_base + 0 * stride_v_meta_attr).to(tl.float32)
+                vs = tl.load(v_met_base + 1 * stride_v_meta_attr).to(tl.float32)
+                
+                v_byte_idx = d_range // V_VALS_PER_BYTE
+                v_sub_idx = d_range % V_VALS_PER_BYTE
+                v_idx_packed = tl.load(v_idx_base + v_byte_idx[None, :] * stride_v_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
+                vi = (v_idx_packed >> (v_sub_idx * V_BITS)).to(tl.int32) & ((1 << V_BITS) - 1)
+                
+                v_deq = tl.load(V_CENTROIDS_ptr + vi).to(tl.float32) * vn * vs
+                
+                # Note: v_deq is currently in Rotated Domain. 
+                # SOTA: Inverse WHT happens at the end (output) or per accumulator to save VRAM.
+                # Here we accumulate in Rotated Domain and rotate the final output.
+                acc = acc * alpha + tl.sum(p[:, None] * v_deq, 0)
+            else:
+                acc = acc * alpha
             
-            v_scale = tl.load(v_met_base + 0 * stride_v_meta_attr)
-            v_zeros = tl.load(v_met_base + 1 * stride_v_meta_attr)
-            
-            v_byte_idx = d_range // V_VALS_PER_BYTE
-            v_sub_idx = d_range % V_VALS_PER_BYTE
-            v_idx_packed = tl.load(v_idx_base + v_byte_idx[None, :] * stride_v_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
-            vi = (v_idx_packed >> (v_sub_idx * V_BITS)).to(tl.int32) & ((1 << V_BITS) - 1)
-            
-            v_deq = vi.to(tl.float32) * v_scale + v_zeros
-            
-            acc = acc * alpha + tl.sum(p[:, None] * v_deq, 0)
             l_i = l_i * alpha + tl.sum(p, 0)
             m_i = m_new
 
@@ -144,6 +147,9 @@ def turboquant_paged_fused_attention(
     v_bits: int,
     qjl_scale: float,
     sm_scale: float,
+    mask: Optional[torch.Tensor] = None,
+    k_centroids: Optional[torch.Tensor] = None,
+    v_centroids: Optional[torch.Tensor] = None,
     quest_threshold: float = 1e-4
 ) -> torch.Tensor:
     # SOTA: Derive n_heads from query shape (Dynamic Dispatch)
@@ -185,19 +191,16 @@ def turboquant_paged_fused_attention(
             res = res[..., :kv_cache.head_dim]
         return res.reshape(query.shape)
 
-    # Tạo bảng Centroid ĐÚNG SỐ BIT
-    k_centroids = compute_centroids(k_mse_bits, dist='gaussian').to(query.device, query.dtype)
+    # SOTA v8.6: Zero-Sync Dispatch (Cache Centroids)
+    if k_centroids is None:
+        k_centroids = compute_centroids(k_mse_bits, dist='gaussian').to(query.device, query.dtype)
+    if v_centroids is None:
+        v_centroids = compute_centroids(v_bits, dist='gaussian').to(query.device, query.dtype)
     
     out = torch.zeros((BH, D), device=query.device, dtype=torch.float32)
     tokens_per_block = pool.tokens_per_block
     
-    # Tính bước nhảy unpack ĐÚNG SỐ BIT (Pillar 3)
-    k_vpb = 8 // k_mse_bits 
-    v_vpb = 8 // v_bits
-    
-    kis, kqs, kms = pool.k_indices.stride(), pool.k_qjl.stride(), pool.k_metadata.stride()
-    vis, vms = pool.v_indices.stride(), pool.v_metadata.stride()
-    ss, ims = pool.k_summaries.stride(), pool.block_importance.stride()
+    v_sparse_threshold = pool.config.quant.v_sparse_threshold
     
     # print(f"[DEBUG] Paged Dispatch | context_len: {context_len}, D: {D}, BH: {BH}")
     import math
@@ -212,9 +215,9 @@ def turboquant_paged_fused_attention(
         V_INDICES_ptr=pool.v_indices,
         V_METADATA_ptr=pool.v_metadata, 
         K_CENTROIDS_ptr=k_centroids, 
+        V_CENTROIDS_ptr=v_centroids,
         BLOCK_TABLE_ptr=block_table, 
         K_SUMMARIES_ptr=pool.k_summaries, 
-        BLOCK_IMPORTANCE_ptr=pool.block_importance,
         OUT_ptr=out,
         LAYER_IDX=kv_cache.layer_idx,
         stride_k_index_l=pool.k_indices.stride(0),
@@ -241,36 +244,33 @@ def turboquant_paged_fused_attention(
         stride_v_meta_b=pool.v_metadata.stride(1),
         stride_v_meta_h=pool.v_metadata.stride(2),
         stride_v_meta_s=pool.v_metadata.stride(3),
-        stride_v_meta_g=pool.v_metadata.stride(4),
-        stride_v_meta_attr=pool.v_metadata.stride(5),
+        stride_v_meta_attr=pool.v_metadata.stride(4),
         stride_sum_l=pool.k_summaries.stride(0),
         stride_sum_b=pool.k_summaries.stride(1),
         stride_sum_h=pool.k_summaries.stride(2),
         stride_sum_attr=pool.k_summaries.stride(3),
         stride_sum_d=pool.k_summaries.stride(4),
-        stride_imp_l=pool.block_importance.stride(0),
-        stride_imp_b=pool.block_importance.stride(1),
-        stride_imp_h=pool.block_importance.stride(2),
         stride_qr_bh=q_rot.stride(0), stride_qr_d=q_rot.stride(1),
         stride_o_bh=out.stride(0), stride_o_d=out.stride(1),
         N=context_len, D=D,
-        K_BITS=k_mse_bits, K_VALS_PER_BYTE=k_vpb,
-        V_BITS=v_bits, V_VALS_PER_BYTE=v_vpb,
+        K_BITS=k_mse_bits, K_VALS_PER_BYTE=8 // k_mse_bits,
+        V_BITS=v_bits, V_VALS_PER_BYTE=8 // v_bits,
         N_HEADS=n_heads,
         N_KV_HEADS=kv_cache.n_kv_heads,
         BLOCK_SIZE=tokens_per_block,
         QJL_SCALE=qjl_scale,
         SM_SCALE=sm_scale, 
         QUEST_THRESHOLD=quest_threshold,
+        V_SPARSE_THRESHOLD=v_sparse_threshold,
         BLOCK_N=pool.config.hw.triton_block_n,
         BLOCK_D=BLOCK_D,
-        V_GROUP_SIZE=pool.config.quant.v_group_size,
         num_warps=pool.config.hw.triton_num_warps
     )
     
-    if D > kv_cache.head_dim:
-        out = out[..., :kv_cache.head_dim]
-        
+    # SOTA v8.5 Final Step: Inverse SRHT to restore original V-domain
+    if kv_cache.v_quantizer is not None:
+        out = kv_cache.v_quantizer.mse_quantizer.rotation.inverse(out.to(query.dtype))
+    
     return out.reshape(query.shape).to(query.dtype)
 
 def paged_turboquant_attention(

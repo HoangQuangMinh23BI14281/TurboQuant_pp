@@ -15,6 +15,8 @@ class QuantConfig:
     qjl_scale: float = 0.1 # Calibrated SOTA Scale
     quant_epsilon: float = 1e-10 # Numerical stability constant
     v_scale_epsilon: float = 1e-6
+    v_sparse_threshold: float = 1e-4
+    block_size: Optional[int] = None # FIX: Backward compatibility cho các bài test di sản
 
 @dataclass
 class HardwareConfig:
@@ -45,6 +47,7 @@ class TurboQuantConfig:
     # Advanced routing (Layer-specific overrides)
     sm_scale: Optional[float] = None
     quest_threshold: float = -1e6 # Default: Disable sparsity for stability
+    v_sparse_threshold: float = 1e-4
     layer_overrides: Dict[int, Dict] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -55,7 +58,6 @@ class TurboQuantConfig:
             self.hw = HardwareConfig(**(self.hw if isinstance(self.hw, dict) else {}))
 
         # SOTA Pillar 3: Hardware Invariant (Triton Tile <= Paged Block)
-        # Nếu triton_block_n > tokens_per_block, kernel sẽ đọc tràn sang block vật lý khác.
         if self.hw.triton_block_n > self.hw.tokens_per_block:
             self.hw.triton_block_n = self.hw.tokens_per_block
 
