@@ -48,6 +48,11 @@ class TurboQuantKVCache:
             k_q = self.k_quantizer.quantize(k) 
             v_q = self.v_quantizer.quantize(v)
             
+            # SOTA FIX: Lấy số lượng bytes nén thực tế để tránh lỗi Mismatch
+            k_idx_bytes = k_q.mse_indices.shape[-1]
+            k_qjl_bytes = k_q.qjl_signs.shape[-1]
+            v_idx_bytes = v_q.indices.shape[-1]
+            
             bsz = self.k_quantizer.mse_quantizer.block_size
             k_rotated = self.k_quantizer.mse_quantizer.rotation(k.float().contiguous().view(-1, bsz))
             k_rotated = k_rotated.view(batch, n_heads, seq_len, head_dim)
@@ -62,15 +67,15 @@ class TurboQuantKVCache:
                 curr_block = self.block_ids[-1]
                 li = self.layer_idx
                 
-                # Chép dữ liệu nén của Key
-                self.pool.k_indices[li, curr_block, :, slot_offset, :].copy_(k_q.mse_indices[0, :, i, :])
-                self.pool.k_qjl[li, curr_block, :, slot_offset, :].copy_(k_q.qjl_signs[0, :, i, :])
+                # Chép dữ liệu nén của Key (Dùng slice dynamic để an toàn tuyệt đối)
+                self.pool.k_indices[li, curr_block, :, slot_offset, :k_idx_bytes].copy_(k_q.mse_indices[0, :, i, :])
+                self.pool.k_qjl[li, curr_block, :, slot_offset, :k_qjl_bytes].copy_(k_q.qjl_signs[0, :, i, :])
                 
                 k_meta = torch.stack([k_q.norms[0,:,i,:], k_q.scales[0,:,i,:], k_q.residual_norms[0,:,i,:]], dim=-1)
                 self.pool.k_metadata[li, curr_block, :, slot_offset, :].copy_(k_meta.reshape(n_heads, -1))
                 
                 # Chép dữ liệu nén của Value
-                self.pool.v_indices[li, curr_block, :, slot_offset, :].copy_(v_q.indices[0, :, i, :])
+                self.pool.v_indices[li, curr_block, :, slot_offset, :v_idx_bytes].copy_(v_q.indices[0, :, i, :])
                 
                 v_meta = torch.stack([v_q.norms[0,:,i,:], v_q.scales[0,:,i,:]], dim=-1)
                 self.pool.v_metadata[li, curr_block, :, slot_offset, :].copy_(v_meta.reshape(n_heads, -1))

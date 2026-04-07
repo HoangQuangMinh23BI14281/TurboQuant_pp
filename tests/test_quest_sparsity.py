@@ -17,8 +17,8 @@ def test_quest_summary_consistency():
     cache.k_quantizer = TurboQuantProd(head_dim, bits=4, block_size=pool.k_group_size).to(device)
     cache.v_quantizer = TurboQuantValue(head_dim, bits=3, block_size=pool.v_group_size).to(device)
 
-    k1 = torch.ones(1, n_heads, 1, head_dim, device=device) * 5.0
-    v1 = torch.ones(1, n_heads, 1, head_dim, device=device)
+    k1 = torch.randn(1, n_heads, 1, head_dim, device=device) * 5.0
+    v1 = torch.randn(1, n_heads, 1, head_dim, device=device)
     cache.append(k1, v1)
     
     bid = cache.block_ids[0]
@@ -34,7 +34,7 @@ def test_quest_summary_consistency():
     val2 = pool.k_summaries[1, bid, 0, 0, 0].item()
     assert pool.k_summaries[1, bid, 0, 0, 0] <= val1
     assert torch.any(pool.k_summaries[1, bid, :, 1, 0] >= val1)
-    
+
 def test_quest_skip_logic():
     """Verify that the Quest threshold successfully skips zero-importance blocks."""
     pytest.skip("Simulated Attention Score is deprecated due to Paged Fused Triton kernel migration.")
