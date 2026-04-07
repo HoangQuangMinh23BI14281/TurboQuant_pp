@@ -101,7 +101,7 @@ class TurboQuantAttention(nn.Module):
              q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
         elif self.rotary_emb is not None:
              # Legacy Fallback: Recalculate
-             cos, sin = self.rotary_emb(v, seq_len=kv_seq_len)
+             cos, sin = self.rotary_emb(v, seq_len=seq_k) # Fixed seq_len reference
              q, k = apply_rotary_pos_emb(q, k, cos, sin, position_ids)
         
         # 4. SOTA: KV Cache Persistence (Mechanical Hijack Check)
@@ -121,11 +121,13 @@ class TurboQuantAttention(nn.Module):
                     container.update_seq_length(q.shape[2])
             
             if seq_q > 1:
-                # 2.1 Prefill Path: Hardware-accelerated SDPA
-                # SOTA v8.5 Fidelity Alignment: Quantize input during prefill for parity
                 if not self.is_protected:
-                    k_full = self.k_quantizer(k) if self.k_quantizer else k
-                    v_full = self.v_quantizer(v) if self.v_quantizer else v
+                    k_full = self.k_quantizer(k).to(q.dtype) if self.k_quantizer else k
+                    v_full = self.v_quantizer(v).to(q.dtype) if self.v_quantizer else v
+                    
+                    # SOTA FIX: ĐỒNG BỘ DTYPE! Trả về đúng float16/bfloat16 của query
+                    k_full = k_full.to(q.dtype)
+                    v_full = v_full.to(q.dtype)
                 else:
                     k_full, v_full = k, v
                 

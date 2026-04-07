@@ -58,7 +58,7 @@ class KVBlockPool:
         self.v_indices = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, self.v_idx_bytes), dtype=torch.uint8, device=self.device)
         self.v_metadata = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, self.tokens_per_block, 2 * self.v_subblocks), dtype=torch.float32, device=self.device)
         
-        self.k_summaries = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, 2, self.k_subblocks), dtype=torch.float32, device=self.device)
+        self.k_summaries = torch.zeros((self.n_layers, self.num_blocks, self.n_heads, 2, self.padded_head_dim), dtype=torch.float32, device=self.device)
         
         self.free_blocks = list(range(self.num_blocks))
         self.allocated_blocks = 0

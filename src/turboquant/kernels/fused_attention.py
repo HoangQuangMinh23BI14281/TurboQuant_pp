@@ -152,12 +152,8 @@ def paged_turboquant_attention(
                 v_deq_sub = v_unit_sub * vn
                 v_all.append(v_deq_sub.reshape(n_heads, -1).to(query.dtype))
         else:
-            if block_size is not None:
-                self.block_size = block_size
-            else:
-                self.block_size = min(64, int(2 ** math.ceil(math.log2(dim)))) if dim > 0 else 1
-            
-            self.n_subblocks = math.ceil(self.dim / self.block_size)
+            # FIX: Nhánh FP16 Thuần (Dành cho Protected Layers như Layer 0, Layer 23)
+            # Xóa sạch mớ rác block_size ở đây, chỉ cần lôi dữ liệu từ cache ra
             for i in range(num_tokens):
                 block_idx = i // tokens_per_block
                 slot_idx = i % tokens_per_block

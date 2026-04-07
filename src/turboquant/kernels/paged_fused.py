@@ -56,49 +56,74 @@ def _turboquant_paged_fused_kernel(
     l_i = tl.zeros([1], dtype=tl.float32)
     acc = tl.zeros([BLOCK_D], dtype=tl.float32)
 
+    # =====================================================================
+    # SOTA HOISTING: Đưa các phép tính toán nguyên đắt đỏ ra ngoài vòng lặp
+    # =====================================================================
+    
+    # 1. Tính toán trước vị trí byte và số bit cần dịch (shift)
+    k_byte_idx = d_range // K_VALS_PER_BYTE
+    k_shift = (d_range % K_VALS_PER_BYTE) * K_BITS
+    k_mask_bits = (1 << K_BITS) - 1
+
+    ks_byte_idx = d_range // 8
+    ks_shift = d_range % 8
+
+    v_byte_idx = d_range // V_VALS_PER_BYTE
+    v_shift = (d_range % V_VALS_PER_BYTE) * V_BITS
+    v_mask_bits = (1 << V_BITS) - 1
+
+    # 2. Tính toán trước các địa chỉ con trỏ cơ sở (Base Pointers) cho Layer và Head hiện tại
+    k_idx_head_base = K_INDICES_ptr + LAYER_IDX * stride_k_index_l + kv_head_idx * stride_k_index_h
+    k_sgn_head_base = K_SIGNS_ptr + LAYER_IDX * stride_k_signs_l + kv_head_idx * stride_k_signs_h
+    k_meta_head_base = K_METADATA_ptr + LAYER_IDX * stride_k_meta_l + kv_head_idx * stride_k_meta_h
+    
+    v_idx_head_base = V_INDICES_ptr + LAYER_IDX * stride_v_index_l + kv_head_idx * stride_v_index_h
+    v_meta_head_base = V_METADATA_ptr + LAYER_IDX * stride_v_meta_l + kv_head_idx * stride_v_meta_h
+    
+    sum_head_base = K_SUMMARIES_ptr + LAYER_IDX * stride_sum_l + kv_head_idx * stride_sum_h
+
+    # =====================================================================
+    # VÒNG LẶP CHÍNH: Chỉ thuần túy Load và Compute
+    # =====================================================================
     for start_n in range(0, N, BLOCK_N):
         n_range = start_n + tl.arange(0, BLOCK_N)
         n_mask = n_range < N
         
-        # 1. Quest: Query-Aware Sparsity Check
+        # Lấy ID của Block vật lý trong Paged Memory
         p_idx = start_n // BLOCK_SIZE
         pb_id = tl.load(BLOCK_TABLE_ptr + p_idx, mask=(start_n < N))
         
-        k_min = tl.load(K_SUMMARIES_ptr + LAYER_IDX * stride_sum_l + pb_id * stride_sum_b + kv_head_idx * stride_sum_h + 0 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
-        k_max = tl.load(K_SUMMARIES_ptr + LAYER_IDX * stride_sum_l + pb_id * stride_sum_b + kv_head_idx * stride_sum_h + 1 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
+        # 1. Quest: Query-Aware Sparsity Check
+        sum_block_base = sum_head_base + pb_id * stride_sum_b
+        k_min = tl.load(sum_block_base + 0 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
+        k_max = tl.load(sum_block_base + 1 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
         
-        # SOTA: Correct Upper Bound for Dot-Product (Interval Arithmetic)
-        # For each dim, we take q * k_max if q > 0, and q * k_min if q < 0.
         quest_bound_elements = tl.where(q_rot > 0, q_rot * k_max, q_rot * k_min)
         quest_bound = tl.sum(quest_bound_elements) * SM_SCALE
         
         if quest_bound >= QUEST_THRESHOLD:
-            # SOTA Pillar 3: Tile-Aligned Block Optimization (n_range fits in ONE physical block)
-            p_id = tl.load(BLOCK_TABLE_ptr + (start_n // BLOCK_SIZE), mask=(start_n < N))
+            # SOTA Pillar 3: Tile-Aligned Block Optimization
             slot_indices = tl.arange(0, BLOCK_N)
             
-            # Key/Signs Base (Pointer per Slot)
-            k_byte_base = K_INDICES_ptr + LAYER_IDX * stride_k_index_l + p_id * stride_k_index_b + kv_head_idx * stride_k_index_h + slot_indices[:, None] * stride_k_index_s
-            k_signs_base = K_SIGNS_ptr + LAYER_IDX * stride_k_signs_l + p_id * stride_k_signs_b + kv_head_idx * stride_k_signs_h + slot_indices[:, None] * stride_k_signs_s
+            # Khởi tạo con trỏ trực tiếp
+            k_byte_base = k_idx_head_base + pb_id * stride_k_index_b + slot_indices[:, None] * stride_k_index_s
+            k_signs_base = k_sgn_head_base + pb_id * stride_k_signs_b + slot_indices[:, None] * stride_k_signs_s
             
-            # 1. Load MSE Indices (Unpack 1 byte per dimension for 8-bit Prod)
-            k_byte_idx = d_range // K_VALS_PER_BYTE
-            k_sub_idx = d_range % K_VALS_PER_BYTE
+            # 1. Load MSE Indices (Sử dụng k_byte_idx và k_shift đã hoist)
             k_idx_packed = tl.load(k_byte_base + k_byte_idx[None, :] * stride_k_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
-            ki = (k_idx_packed >> (k_sub_idx * K_BITS)).to(tl.int32) & ((1 << K_BITS) - 1)
+            ki = ((k_idx_packed >> k_shift[None, :]).to(tl.int32) & k_mask_bits)
             
-            # 2. Load Direct Signs (1-bit packed)
-            ks_byte_idx = d_range // 8
-            ks_sub_idx = d_range % 8
+            # 2. Load Direct Signs
             k_sig_packed = tl.load(k_signs_base + ks_byte_idx[None, :] * stride_k_signs_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
-            ksi = (k_sig_packed >> ks_sub_idx) & 1
+            ksi = (k_sig_packed >> ks_shift[None, :]) & 1
             
-            # 3. Key Metadata (Load Per-Slot into 1D Registers)
-            k_met_base = K_METADATA_ptr + LAYER_IDX * stride_k_meta_l + p_id * stride_k_meta_b + kv_head_idx * stride_k_meta_h + slot_indices[:, None] * stride_k_meta_s
+            # 3. Key Metadata
+            k_met_base = k_meta_head_base + pb_id * stride_k_meta_b + slot_indices[:, None] * stride_k_meta_s
             kn = tl.load(k_met_base + 0 * stride_k_meta_attr).to(tl.float32)
             ks = tl.load(k_met_base + 1 * stride_k_meta_attr).to(tl.float32)
             kr = tl.load(k_met_base + 2 * stride_k_meta_attr).to(tl.float32)
             
+            # Dequantize (Tận dụng GPU Caching cho bảng Centroids)
             k_mse = tl.load(K_CENTROIDS_ptr + ki).to(tl.float32) * kn * ks
             k_qjl = (ksi.to(tl.float32) * 2.0 - 1.0) * kr * QJL_SCALE
             
@@ -106,30 +131,26 @@ def _turboquant_paged_fused_kernel(
             scores = tl.sum(q_rot[None, :] * (k_mse + k_qjl), 1) * SM_SCALE
             scores = tl.where(n_mask, scores, float("-inf"))
             
+            # Online Softmax Math
             m_new = tl.maximum(m_i, tl.max(scores, 0))
             alpha = tl.exp(m_i - m_new)
             p = tl.exp(scores - m_new)
             
             # 2. Sparse V-Fetch (SOTA v8.5)
-            # Skip V-dequant if this block has no significant overlap with Query
             if tl.max(p) > V_SPARSE_THRESHOLD:
-                # 4. Dequantize V-Cache (SRHT-MSE Model)
-                v_idx_base = V_INDICES_ptr + LAYER_IDX * stride_v_index_l + p_id * stride_v_index_b + kv_head_idx * stride_v_index_h + slot_indices[:, None] * stride_v_index_s
-                v_met_base = V_METADATA_ptr + LAYER_IDX * stride_v_meta_l + p_id * stride_v_meta_b + kv_head_idx * stride_v_meta_h + slot_indices[:, None] * stride_v_meta_s
+                # 4. Dequantize V-Cache
+                v_idx_base = v_idx_head_base + pb_id * stride_v_index_b + slot_indices[:, None] * stride_v_index_s
+                v_met_base = v_meta_head_base + pb_id * stride_v_meta_b + slot_indices[:, None] * stride_v_meta_s
                 
                 vn = tl.load(v_met_base + 0 * stride_v_meta_attr).to(tl.float32)
                 vs = tl.load(v_met_base + 1 * stride_v_meta_attr).to(tl.float32)
                 
-                v_byte_idx = d_range // V_VALS_PER_BYTE
-                v_sub_idx = d_range % V_VALS_PER_BYTE
                 v_idx_packed = tl.load(v_idx_base + v_byte_idx[None, :] * stride_v_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
-                vi = (v_idx_packed >> (v_sub_idx * V_BITS)).to(tl.int32) & ((1 << V_BITS) - 1)
+                vi = ((v_idx_packed >> v_shift[None, :]).to(tl.int32) & v_mask_bits)
                 
                 v_deq = tl.load(V_CENTROIDS_ptr + vi).to(tl.float32) * vn * vs
                 
-                # Note: v_deq is currently in Rotated Domain. 
-                # SOTA: Inverse WHT happens at the end (output) or per accumulator to save VRAM.
-                # Here we accumulate in Rotated Domain and rotate the final output.
+                # Tích lũy (Accumulate) trên miền đã xoay Rotated Domain
                 acc = acc * alpha + tl.sum(p[:, None] * v_deq, 0)
             else:
                 acc = acc * alpha
@@ -137,7 +158,7 @@ def _turboquant_paged_fused_kernel(
             l_i = l_i * alpha + tl.sum(p, 0)
             m_i = m_new
 
-    # SOTA: add safety epsilon to prevent NaN if all blocks are skipped
+    # Store kết quả cuối
     tl.store(OUT_ptr + pid_bh * stride_o_bh + d_range, (acc / (l_i + 1e-10)).to(tl.float32), mask=d_mask)
 
 def turboquant_paged_fused_attention(
