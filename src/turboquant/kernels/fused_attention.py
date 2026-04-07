@@ -15,6 +15,8 @@ from .fused_ref import attention_score_mse, attention_score_prod
 try:
     from .triton_attention import turboquant_attention_score
     from .paged_fused import turboquant_paged_fused_attention
+    from .triton_fused import turboquant_fused_decode
+    from ..quant.lloyd_max import LM_CENTROIDS
     HAS_TRITON = True
 except ImportError:
     HAS_TRITON = False
@@ -212,6 +214,27 @@ def turboquant_attention(
             v_bits_val = v_bits if v_bits is not None else (kv_cache.v_quantizer.bits if kv_cache.v_quantizer else 4)
             output = paged_turboquant_attention(query, kv_cache, k_bits_val, v_bits_val, qjl_scale, sm_scale)
             return output, None
+
+    # Triton Fused Contiguous Path (Decode Stage)
+    if HAS_TRITON and query.is_cuda and query.shape[-2] == 1 and \
+       isinstance(key, ProdQuantized) and isinstance(value, ValueQuantized):
+        
+        q_rot, q_sketch = quantizer.transform_query(query)
+        centroids = LM_CENTROIDS[quantizer.bits - 1].to(query.device, query.dtype)
+        
+        # Use the new SOTA fused kernel
+        output = turboquant_fused_decode(
+            q_rot=q_rot,
+            q_sketch=q_sketch,
+            quantized_key=key,
+            value_quantized=value,
+            centroids=centroids,
+            k_bits=quantizer.bits,
+            v_bits=value.bits,
+            qjl_scale=qjl_scale,
+            sm_scale=sm_scale
+        )
+        return output.view(query.shape[:-1] + (query.shape[-1],)), None
 
     if isinstance(key, ProdQuantized):
         scores = attention_score_prod_dispatch(query, key, quantizer, qjl_scale, sm_scale)

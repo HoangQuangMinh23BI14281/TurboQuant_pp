@@ -15,11 +15,12 @@ def _turboquant_fused_decode_kernel(
     NORMS_ptr,       # (BH, N)
     RES_NORMS_ptr,   # (BH, N)
     SCALES_ptr,      # (BH, N) - Added for refinement
-    CENTROIDS_ptr,   # (n_clusters,)
+    CENTROIDS_ptr,   # (n_clusters_k,)
+    V_CENTROIDS_ptr, # (n_clusters_v,)
     # Values (group-quantized & packed)
     V_DATA_ptr,      # (BH, N, packed_d_v)
-    V_SCALES_ptr,    # (BH, N, N_GROUPS)
-    V_ZEROS_ptr,     # (BH, N, N_GROUPS)
+    V_NORMS_ptr,     # (BH, N)
+    V_SCALES_ptr,    # (BH, N)
     # Output
     OUT_ptr,         # (BH, D)
     # Strides
@@ -31,8 +32,8 @@ def _turboquant_fused_decode_kernel(
     stride_rn_bh, stride_rn_n,
     stride_sc_bh, stride_sc_n,
     stride_v_bh, stride_v_n, stride_v_d,
-    stride_vs_bh, stride_vs_n, stride_vs_g,
-    stride_vz_bh, stride_vz_n, stride_vz_g,
+    stride_vn_bh, stride_vn_n,
+    stride_vs_bh, stride_vs_n,
     stride_o_bh, stride_o_d,
     # Dims
     N, D: tl.constexpr,
@@ -124,11 +125,10 @@ def _turboquant_fused_decode_kernel(
         v_packed = tl.load(V_DATA_ptr + pid_bh * stride_v_bh + n_offs[:, None] * stride_v_n + v_byte_idx[None, :] * stride_v_d, mask=n_mask[:, None], other=0).to(tl.int32)
         vi = (v_packed >> (v_sub_idx * V_BITS)) & V_BIT_MASK
         
-        v_group_idx = d_offs // GROUP_SIZE
-        v_s = tl.load(V_SCALES_ptr + pid_bh * stride_vs_bh + n_offs[:, None] * stride_vs_n + v_group_idx[None, :] * stride_vs_g, mask=n_mask[:, None], other=1.0).to(tl.float32)
-        v_z = tl.load(V_ZEROS_ptr + pid_bh * stride_vz_bh + n_offs[:, None] * stride_vz_n + v_group_idx[None, :] * stride_vz_g, mask=n_mask[:, None], other=0.0).to(tl.float32)
+        v_norm = tl.load(V_NORMS_ptr + pid_bh * stride_vn_bh + n_offs * stride_vn_n, mask=n_mask, other=0.0).to(tl.float32)
+        v_scale = tl.load(V_SCALES_ptr + pid_bh * stride_vs_bh + n_offs * stride_vs_n, mask=n_mask, other=1.0).to(tl.float32)
         
-        v_deq = vi.to(tl.float32) * v_s + v_z
+        v_deq = tl.load(V_CENTROIDS_ptr + vi).to(tl.float32) * v_norm[:, None] * v_scale[:, None]
         acc = acc * alpha + tl.sum(p[:, None] * v_deq, 0)
 
         m_i = m_new
@@ -167,8 +167,8 @@ def turboquant_fused_decode(
     
     # Value Metadata
     v_data = value_quantized.indices
-    v_scales = value_quantized.scales
-    v_zeros = value_quantized.zero_points
+    v_norms = value_quantized.norms
+    v_scales = value_quantized.scales.squeeze(-1) # (BH, N)
 
     # Flatten Batch-Head if needed
     if mse_packed.dim() > 3:
@@ -178,17 +178,21 @@ def turboquant_fused_decode(
         res_norms = res_norms.flatten(0, -2)
         scales = scales.flatten(0, -2)
         v_data = v_data.flatten(0, -3)
-        v_scales = v_scales.flatten(0, -3)
-        v_zeros = v_zeros.flatten(0, -3)
+        v_norms = v_norms.flatten(0, -2)
+        v_scales = v_scales.flatten(0, -2)
 
     N = mse_packed.shape[1]
     packed_d_mse = mse_packed.shape[2]
     packed_d_signs = qjl_signs.shape[2]
     packed_d_v = v_data.shape[2]
-    N_GROUPS = D // group_size
-
+    
     k_eff_bits, k_vals_per_byte = _get_packing_params(k_bits)
     v_eff_bits, v_vals_per_byte = _get_packing_params(v_bits)
+
+    # Centroids
+    from ..quant.lloyd_max import LM_CENTROIDS
+    k_centroids = centroids # Provided by dispatcher
+    v_centroids = LM_CENTROIDS[v_bits].to(q_rot.device, q_rot.dtype)
 
     out = torch.zeros((BH, D), device=q_rot.device, dtype=torch.float32)
     BLOCK_N = block_n if block_n else 64
@@ -197,8 +201,8 @@ def turboquant_fused_decode(
 
     _turboquant_fused_decode_kernel[grid](
         q_rot, q_sketch,
-        mse_packed, qjl_signs, norms, res_norms, scales, centroids,
-        v_data, v_scales, v_zeros, out,
+        mse_packed, qjl_signs, norms, res_norms, scales, k_centroids, v_centroids,
+        v_data, v_norms, v_scales, out,
         q_rot.stride(0), q_rot.stride(1),
         q_sketch.stride(0), q_sketch.stride(1),
         mse_packed.stride(0), mse_packed.stride(1), mse_packed.stride(2),
@@ -207,11 +211,11 @@ def turboquant_fused_decode(
         res_norms.stride(0), res_norms.stride(1),
         scales.stride(0), scales.stride(1),
         v_data.stride(0), v_data.stride(1), v_data.stride(2),
-        v_scales.stride(0), v_scales.stride(1), v_scales.stride(2),
-        v_zeros.stride(0), v_zeros.stride(1), v_zeros.stride(2),
+        v_norms.stride(0), v_norms.stride(1),
+        v_scales.stride(0), v_scales.stride(1),
         out.stride(0), out.stride(1),
         N=N, D=D, PACKED_D_MSE=packed_d_mse, PACKED_D_SIGNS=packed_d_signs, PACKED_D_V=packed_d_v,
-        N_GROUPS=N_GROUPS, GROUP_SIZE=group_size,
+        N_GROUPS=0, GROUP_SIZE=0, # Dummies now
         K_BITS=k_eff_bits, K_VALS_PER_BYTE=k_vals_per_byte,
         V_BITS=v_eff_bits, V_VALS_PER_BYTE=v_vals_per_byte,
         QJL_SCALE=qjl_scale, SM_SCALE=sm_scale,
