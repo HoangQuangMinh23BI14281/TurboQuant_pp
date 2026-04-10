@@ -26,6 +26,7 @@ def _turboquant_paged_fused_kernel(
     K_SUMMARIES_ptr,        # Quest: Min/Max per block
     OUT_ptr,
     LAYER_IDX,
+    MAX_BLOCKS, # SOTA: Boundary guard
     stride_k_index_l, stride_k_index_b, stride_k_index_h, stride_k_index_s, stride_k_index_d,
     stride_k_signs_l, stride_k_signs_b, stride_k_signs_h, stride_k_signs_s, stride_k_signs_d,
     stride_k_meta_l, stride_k_meta_b, stride_k_meta_h, stride_k_meta_s, stride_k_meta_attr,
@@ -88,20 +89,18 @@ def _turboquant_paged_fused_kernel(
     sum_head_base = K_SUMMARIES_ptr + LAYER_IDX * stride_sum_l + kv_head_idx * stride_sum_h
 
     # =====================================================================
-    # VÒNG LẶP CHÍNH: Sử dụng tl.while cho context length động
+    # SOTA: Parallel Block-Loop with Dynamic Boundary Guard (While Loop)
     # =====================================================================
-    # =====================================================================
-    # SOTA: Parallel Block-Loop with Static Guard
-    # =====================================================================
-    MAX_BLOCKS = 1024 # SOTA: Fixed upper bound for CUDA Graph stability
-    for b_idx in range(MAX_BLOCKS):
+    b_idx = 0
+    while (b_idx * BLOCK_SIZE < N) and (b_idx < MAX_BLOCKS):
         start_n = b_idx * BLOCK_SIZE
         
-        # SOTA: Masking instead of break for AST compatibility
+        # SOTA: Recalculate n_mask for masked loads inside while loop
         n_mask = (start_n + tl.arange(0, BLOCK_N)) < N
         
-        # Lấy ID của Block vật lý trong Paged Memory (Masked load)
-        pb_id = tl.load(BLOCK_TABLE_ptr + b_idx, mask=(start_n < N), other=0)
+        # Lấy ID của Block vật lý trong Paged Memory
+        pb_id = tl.load(BLOCK_TABLE_ptr + b_idx)
+
         
         # 1. Quest: Query-Aware Sparsity Check
         # SOTA: Only process if within valid sequence length
@@ -161,9 +160,13 @@ def _turboquant_paged_fused_kernel(
                 
                 l_i = l_i * alpha + tl.sum(p, 0)
                 m_i = m_new
+        
+        # SOTA: Loop increment
+        b_idx += 1
 
     # Store kết quả cuối
     tl.store(OUT_ptr + pid_bh * stride_o_bh + d_range, (acc / (l_i + 1e-10)).to(tl.float32), mask=d_mask)
+
 
 def turboquant_paged_fused_attention(
     query: torch.Tensor,
@@ -227,6 +230,14 @@ def turboquant_paged_fused_attention(
     v_sparse_threshold = pool.config.quant.v_sparse_threshold
     BLOCK_D = 2**math.ceil(math.log2(D))
     
+    # SOTA Performance Fix: Calculate MAX_BLOCKS
+    # In Eager mode, we only iterate over used blocks.
+    # In Graph mode, we MUST use the full table capacity for capture stability.
+    is_capturing = torch.cuda.is_current_stream_capturing()
+    max_blocks_limit = block_table.shape[0] if is_capturing else len(kv_cache.block_ids)
+    # Ensure there is at least one block to avoid 0-iteration logic errors
+    max_blocks_limit = max(1, max_blocks_limit)
+
     grid = (BH,)
     _turboquant_paged_fused_kernel[grid](
         Q_ROT_ptr=q_rot,
@@ -242,6 +253,7 @@ def turboquant_paged_fused_attention(
         K_SUMMARIES_ptr=pool.k_summaries, 
         OUT_ptr=out,
         LAYER_IDX=kv_cache.layer_idx,
+        MAX_BLOCKS=max_blocks_limit,
         stride_k_index_l=pool.k_indices.stride(0),
         stride_k_index_b=pool.k_indices.stride(1),
         stride_k_index_h=pool.k_indices.stride(2),

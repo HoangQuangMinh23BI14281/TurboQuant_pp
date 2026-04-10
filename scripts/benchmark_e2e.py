@@ -25,7 +25,7 @@ def reset_turboquant_cache(model):
         layer.block_ids = []  # Reset Python block tracking
         layer.k_fp16 = {}     # Reset FP16 cache for protected layers
         layer.v_fp16 = {}
-        layer.block_table = layer.pool.allocate_layer_blocks(128) # Pre-fill for graph stability
+        layer.block_table = layer.pool.allocate_blocks_bulk(128) # Pre-fill for graph stability
         layer.k_centroids = None
         layer.v_centroids = None
         # Clear any pre-allocated static output

@@ -1,4 +1,5 @@
 import torch
+import math
 from typing import Dict, Any, List, Optional, Tuple
 
 from turboquant.cache.block_pool import KVBlockPool
@@ -38,84 +39,87 @@ class TurboQuantKVCache:
         self.v_fp16: Dict[int, torch.Tensor] = {}
         self.block_ids = [] # SOTA: Maintain list for regular Python paths
 
-    def append(self, k: torch.Tensor, v: torch.Tensor):
+    def _append_decode_fused(self, k_q: Any, v_q: Any):
+        """SOTA: Fused cache update for decoding (seq_len=1)."""
+        if self.block_table is None:
+            # SOTA: Auto-allocate a modest slab for decoding
+            self.block_table = self.pool.allocate_blocks_bulk(128) 
+
+        # SOTA: Fused Cache Update (No Python Dispatch)
+        fused_cache_update(self, k_q, v_q)
+        
+        # SOTA: In-place increment (Async)
+        self.num_tokens_ptr.add_(1)
+        self.num_tokens += 1
+
+    def _append_prefill_vectorized(self, k_q: Any, v_q: Any, seq_len: int, k_rotated: Optional[torch.Tensor] = None):
+        """SOTA: Vectorized block-level copy for prefill (seq_len > 1)."""
+        tokens_per_block = self.pool.tokens_per_block
+        li = self.layer_idx
+        
+        start_token = self.num_tokens
+        end_token = self.num_tokens + seq_len
+        
+        # ... logic for allocation (same as before) ...
+        current_blocks = len(self.block_ids)
+        total_blocks_needed = math.ceil(end_token / tokens_per_block)
+        if total_blocks_needed > current_blocks:
+            new_blocks = self.pool.allocate_blocks_bulk(total_blocks_needed - current_blocks)
+            self.block_ids.extend(new_blocks.tolist())
+            if self.block_table is None:
+                self.block_table = torch.zeros(1024, dtype=torch.int32, device=self.device)
+            self.block_table[current_blocks:total_blocks_needed] = new_blocks
+
+        # 2. Block-Level Vectorized Copy
+        for b_idx in range(start_token // tokens_per_block, total_blocks_needed):
+            block_start_abs = b_idx * tokens_per_block
+            block_end_abs = (b_idx + 1) * tokens_per_block
+            
+            seq_start = max(0, block_start_abs - start_token)
+            seq_end = min(seq_len, block_end_abs - start_token)
+            
+            slot_start = max(0, start_token - block_start_abs)
+            slot_end = min(tokens_per_block, end_token - block_start_abs)
+            
+            p_block = self.block_ids[b_idx]
+            
+            self.pool.k_indices[li, p_block, :, slot_start:slot_end, :].copy_(k_q.mse_indices[0, :, seq_start:seq_end, :])
+            self.pool.k_qjl[li, p_block, :, slot_start:slot_end, :].copy_(k_q.qjl_signs[0, :, seq_start:seq_end, :])
+            self.pool.k_metadata[li, p_block, :, slot_start:slot_end, :].copy_(k_q.meta[0, :, seq_start:seq_end, :])
+            self.pool.v_indices[li, p_block, :, slot_start:slot_end, :].copy_(v_q.indices[0, :, seq_start:seq_end, :])
+            self.pool.v_metadata[li, p_block, :, slot_start:slot_end, :].copy_(v_q.meta[0, :, seq_start:seq_end, :])
+
+            # 3. Vectorized Summaries (Quest Sparsity)
+            if k_rotated is not None:
+                k_rot_slice = k_rotated[0, :, seq_start:seq_end, :]
+                if slot_start == 0:
+                    self.pool.k_summaries[li, p_block, :, 0].copy_(k_rot_slice.amin(dim=1))
+                    self.pool.k_summaries[li, p_block, :, 1].copy_(k_rot_slice.amax(dim=1))
+                else:
+                    # Partial block update
+                    torch.min(self.pool.k_summaries[li, p_block, :, 0], k_rot_slice.amin(dim=1), out=self.pool.k_summaries[li, p_block, :, 0])
+                    torch.max(self.pool.k_summaries[li, p_block, :, 1], k_rot_slice.amax(dim=1), out=self.pool.k_summaries[li, p_block, :, 1])
+
+        self.num_tokens += seq_len
+        self.num_tokens_ptr.fill_(self.num_tokens)
+
+    def append(self, k: torch.Tensor, v: torch.Tensor, k_q: Optional[Any] = None, v_q: Optional[Any] = None, k_rotated: Optional[torch.Tensor] = None):
         batch, n_heads, seq_len, head_dim = k.shape
         assert batch == 1, "TurboQuant++ currently supports batch_size=1"
         
-        tokens_per_block = self.pool.tokens_per_block
-        
-        if self.k_quantizer is not None and seq_len == 1:
-            if self.block_table is None:
-                # SOTA: Auto-allocate a reasonable slab for decoding if not pre-allocated
-                # Usually benchmark_e2e will pre-allocate this for graphs
-                self.block_table = self.pool.allocate_layer_blocks(128) 
-
-            # SOTA: Quantize first
-            k_q = self.k_quantizer.quantize(k)
-            v_q = self.v_quantizer.quantize(v)
-
-            # SOTA: Fused Cache Update (No Python Dispatch)
-            fused_cache_update(self, k_q, v_q)
-            
-            # Increment counters (Both GPU and CPU shadow)
-            # Increment counters (Both GPU and CPU shadow)
-            self.num_tokens_ptr += 1
-            self.num_tokens += 1
-            return
-        
         if self.k_quantizer is not None:
-            # ========================================================
-            # PREFILL PATH (seq_len > 1) - Optimizations for large chunks
-            # ========================================================
-            k_q = self.k_quantizer.quantize(k) 
-            v_q = self.v_quantizer.quantize(v)
-            k_idx_bytes = k_q.mse_indices.shape[-1]
-            k_qjl_bytes = k_q.qjl_signs.shape[-1]
-            v_idx_bytes = v_q.indices.shape[-1]
+            if k_q is None:
+                k_q = self.k_quantizer.quantize(k)
+            if v_q is None:
+                v_q = self.v_quantizer.quantize(v)
             
-            bsz = self.k_quantizer.mse_quantizer.block_size
-            k_rotated = self.k_quantizer.mse_quantizer.rotation(k.float().contiguous().view(-1, bsz))
-            k_rotated = k_rotated.view(batch, n_heads, seq_len, head_dim)
-            
-            for i in range(seq_len):
-                current_slot = self.num_tokens
-                slot_offset = current_slot % tokens_per_block
-                
-                if slot_offset == 0:
-                    new_block = self.pool.allocate_block()
-                    self.block_ids.append(new_block)
-                    # Sync with Tensor-based block_table for Attention kernel
-                    if self.block_table is None:
-                        self.block_table = self.pool.allocate_layer_blocks(128)
-                    self.block_table[len(self.block_ids)-1] = new_block
-                
-                curr_block = self.block_ids[-1]
-                li = self.layer_idx
-                
-                # SOTA metadata access (Using original loop for prefill precision)
-                self.pool.k_indices[li, curr_block, :, slot_offset, :k_idx_bytes].copy_(k_q.mse_indices[0, :, i, :])
-                self.pool.k_qjl[li, curr_block, :, slot_offset, :k_qjl_bytes].copy_(k_q.qjl_signs[0, :, i, :])
-                self.pool.k_metadata[li, curr_block, :, slot_offset, :].copy_(k_q.meta[0, :, i, :])
-                
-                self.pool.v_indices[li, curr_block, :, slot_offset, :v_idx_bytes].copy_(v_q.indices[0, :, i, :])
-                self.pool.v_metadata[li, curr_block, :, slot_offset, :].copy_(v_q.meta[0, :, i, :])
-                
-                # Summaries for Prefill
-                k_rot_h_d = k_rotated[0, :, i, :]
-                if slot_offset == 0:
-                    self.pool.k_summaries[li, curr_block, :, 0].copy_(k_rot_h_d)
-                    self.pool.k_summaries[li, curr_block, :, 1].copy_(k_rot_h_d)
-                else:
-                    torch.min(self.pool.k_summaries[li, curr_block, :, 0], k_rot_h_d, out=self.pool.k_summaries[li, curr_block, :, 0])
-                    torch.max(self.pool.k_summaries[li, curr_block, :, 1], k_rot_h_d, out=self.pool.k_summaries[li, curr_block, :, 1])
-                    
-                self.num_tokens += 1
-            if torch.cuda.is_current_stream_capturing() or 'cuda' in str(self.device):
-                self.num_tokens_ptr.add_(1) # Update GPU tracker
+            if seq_len == 1:
+                self._append_decode_fused(k_q, v_q)
+            else:
+                self._append_prefill_vectorized(k_q, v_q, seq_len, k_rotated=k_rotated)
         else:
-            # ========================================================
-            # NHÁNH FP16 NGUYÊN BẢN (Protected Layers)
-            # ========================================================
+            # FP16 Protected Path
+            tokens_per_block = self.pool.tokens_per_block
             for i in range(seq_len):
                 current_slot = self.num_tokens
                 slot_offset = current_slot % tokens_per_block
@@ -129,11 +133,11 @@ class TurboQuantKVCache:
                     self.k_fp16[curr_block] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
                     self.v_fp16[curr_block] = torch.zeros((n_heads, tokens_per_block, head_dim), dtype=k.dtype, device=self.device)
                     
-                self.k_fp16[curr_block][:, slot_offset] = k[:, :, i].squeeze(0)
-                self.v_fp16[curr_block][:, slot_offset] = v[:, :, i].squeeze(0)
+                self.k_fp16[curr_block][:, slot_offset] = k[0, :, i]
+                self.v_fp16[curr_block][:, slot_offset] = v[0, :, i]
                 self.num_tokens += 1
-            if torch.cuda.is_current_stream_capturing() or 'cuda' in str(self.device):
-                self.num_tokens_ptr.add_(1) # Update GPU tracker
+            self.num_tokens_ptr.fill_(self.num_tokens)
+
 
     def init_static_fp16_workspace(self, n_heads: int, head_dim: int, max_seq_len: int):
         """Pre-allocate a flat buffer for protected layers (CUDA Graph safe)."""

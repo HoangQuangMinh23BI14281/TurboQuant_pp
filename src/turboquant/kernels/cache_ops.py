@@ -107,15 +107,15 @@ def fused_cache_update(
     layer_idx = kv_cache.layer_idx
     
     # We assume batch_size=1 and seq_len=1 for decoding
-    # k_q.mse_indices shape: (1, n_heads, 1, d)
-    k_idx = k_q.mse_indices.squeeze(0).squeeze(1) # (n_heads, d)
-    k_sgn = k_q.qjl_signs.squeeze(0).squeeze(1)
-    k_meta = k_q.meta.squeeze(0).squeeze(1)
+    # SOTA v9.4: Use flat views to avoid Python-side squeeze overhead
+    k_idx = k_q.mse_indices.view(-1, k_q.mse_indices.shape[-1])
+    k_sgn = k_q.qjl_signs.view(-1, k_q.qjl_signs.shape[-1])
+    k_meta = k_q.meta.view(-1, k_q.meta.shape[-1])
     
-    v_idx = v_q.indices.squeeze(0).squeeze(1)
-    v_meta = v_q.meta.squeeze(0).squeeze(1)
+    v_idx = v_q.indices.view(-1, v_q.indices.shape[-1])
+    v_meta = v_q.meta.view(-1, v_q.meta.shape[-1])
     
-    n_heads = k_idx.shape[0]
+    n_heads = k_q.mse_indices.shape[1]
     
     grid = (n_heads,)
     _fused_cache_update_kernel[grid](

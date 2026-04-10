@@ -5,11 +5,12 @@ import torch.nn.functional as F
 from typing import Tuple, Optional
 
 from .quant_base import MSEQuantized, ProdQuantized, ValueQuantized, pack_indices, unpack_indices
-from .lloyd_max import lloyd_max_quantize, lloyd_max_dequantize
+from .lloyd_max import lloyd_max_quantize, lloyd_max_dequantize, compute_lloyd_max_codebook
 from ..ops.rotation import TurboQuantRotation
 from ..ops.wht import fwht, ifwht
 from ..ops.sign_array import generate_sign_array, apply_sign_array
 from ..cache.routing import QuantizationStrategy
+from ..kernels.quant_fused import fused_quantize
 
 class TurboQuantMSE(nn.Module):
     def __init__(self, dim: int, bits: int = 8, n_rotation_passes: int = 1, dist: str = 'gaussian', block_size: Optional[int] = None, **kwargs):
@@ -30,9 +31,21 @@ class TurboQuantMSE(nn.Module):
         self.n_subblocks = math.ceil(self.dim / self.block_size)
         self.padded = (self.block_size * self.n_subblocks != self.dim)
         self.rotation = TurboQuantRotation(self.block_size, n_passes=n_rotation_passes, pattern='tbq')
+        # V10.14: 64-byte Aligned Boundaries (16 elements)
+        cb = compute_lloyd_max_codebook(self.bits, d=1, dist=self.dist)
+        # Pad 15 finite boundaries with 1 large value to reach 16
+        bounds = cb['boundaries'][1:-1].float()
+        padded_bounds = torch.cat([bounds, torch.tensor([1e10], device=bounds.device, dtype=bounds.dtype)])
+        self.register_buffer("triton_boundaries", padded_bounds.contiguous())
+        self.max_centroid = cb['max_centroid']
+        self.register_buffer("rot_final_scale", self.rotation.final_scale.float())
+        self.register_buffer("wht_mat_f32", self.rotation.wht_mat.float().contiguous())
+        self.final_scale_val = self.rot_final_scale.item()
 
     def transform_query(self, query: torch.Tensor) -> torch.Tensor:
-        if query.shape[-2] == 1:
+        # SOTA v9.4: Zero-Dispatch Transform
+        orig_shape = query.shape
+        if orig_shape[-2] == 1:
             query = query.squeeze(-2)
         
         if self.padded:
@@ -40,26 +53,90 @@ class TurboQuantMSE(nn.Module):
         else:
             query = query.float()
         
-        # SOTA FIX: Đảm bảo contiguous trước khi view để xử lý paged memory
-        q_reshaped = query.contiguous().view(-1, self.block_size)
-        q_rot_reshaped = self.rotation(q_reshaped)
-        return q_rot_reshaped.view(query.shape)
+        # SOTA: In-place-ish reshape with minimalist contiguous call
+        # We only call contiguous() once for the whole pipeline
+        q_flattened = query.reshape(-1, self.block_size)
+        if not q_flattened.is_contiguous():
+            q_flattened = q_flattened.contiguous()
+            
+        q_rot = self.rotation(q_flattened)
+        return q_rot.reshape(orig_shape)
 
     def quantize(self, x: torch.Tensor, pack: bool = False, precomputed_norms: torch.Tensor = None, precomputed_scales: torch.Tensor = None) -> MSEQuantized:
+        # SOTA v10.1: Optimized Fused Triton Path
+        if x.is_cuda and x.shape[-1] == self.block_size:
+
+
+            orig_shape = x.shape
+            x_flat = x.float().reshape(-1, self.dim)
+            
+            orig_shape = x.shape
+            x_flat = x.float().reshape(-1, self.dim)
+            
+            # SOTA v12.5: Zero-Allocation Cache for CUDA Graphs
+            if not hasattr(self, "_static_out_indices") or self._static_out_indices.shape[0] < x_flat.shape[0]:
+                vals_per_byte = 2 if pack else 1
+                packed_d = self.dim // vals_per_byte
+                self._static_out_indices = torch.empty((x_flat.shape[0], packed_d), dtype=torch.uint8, device=x.device)
+                self._static_out_scales = torch.empty((x_flat.shape[0], 1), dtype=torch.float32, device=x.device)
+                self._static_out_norms = torch.empty((x_flat.shape[0], 1), dtype=torch.float32, device=x.device)
+                self._static_out_rotated = torch.empty((x_flat.shape[0], self.dim), dtype=torch.float32, device=x.device)
+
+            indices_raw, scales_raw, norms_raw, rotated_raw = fused_quantize(
+                x_flat, 
+                self.rotation.all_signs,
+                self.wht_mat_f32,
+                self.bits, 
+                self.max_centroid, 
+                self.final_scale_val,
+                dist_type=self.dist,
+                pack=pack,
+                out_indices=self._static_out_indices,
+                out_scales=self._static_out_scales,
+                out_norms=self._static_out_norms,
+                out_rotated=self._static_out_rotated
+            )
+            
+            # SOTA v12.6: Slice static buffers to current token count (Zero-Copy)
+            n_tokens = x_flat.shape[0]
+            indices = indices_raw[:n_tokens]
+            scales = scales_raw[:n_tokens]
+            norms = norms_raw[:n_tokens]
+            rotated = rotated_raw[:n_tokens]
+
+
+
+
+            
+            meta_shape = orig_shape[:-1] + (self.n_subblocks,)
+            packed_d = indices.shape[-1]
+            out_shape = orig_shape[:-1] + (packed_d,)
+            
+            return MSEQuantized(
+                indices=indices.reshape(out_shape),
+                norms=norms.reshape(meta_shape),
+                scales=scales.reshape(meta_shape),
+                bits=self.bits,
+                packed=pack,
+                rotated_tensor=rotated.reshape(orig_shape)
+            )
+
+        # Legacy/CPU Fallback
         shape = x.shape[:-1]
-        device = x.device
         dtype = x.dtype
         
+        # 1. Flatten into blocks with a single contiguous check
+        x_fp32 = x.float()
         if self.padded:
-            x_padded_init = F.pad(x.float(), (0, self.block_size * self.n_subblocks - self.dim))
-        else:
-            x_padded_init = x.float()
-            
-        # SOTA FIX: .contiguous() là bắt buộc khi dữ liệu bị slice từ KV Cache
-        x_reshaped = x_padded_init.contiguous().view(-1, self.block_size)
+            x_fp32 = F.pad(x_fp32, (0, self.block_size * self.n_subblocks - self.dim))
         
+        x_reshaped = x_fp32.reshape(-1, self.block_size)
+        if not x_reshaped.is_contiguous():
+            x_reshaped = x_reshaped.contiguous()
+        
+        # 2. Vector Norms
         if precomputed_norms is not None:
-            vec_norms = precomputed_norms.contiguous().view(-1, 1)
+            vec_norms = precomputed_norms.reshape(-1, 1)
         else:
             vec_norms = torch.norm(x_reshaped, p=2, dim=-1, keepdim=True) + self.epsilon
             
@@ -67,59 +144,50 @@ class TurboQuantMSE(nn.Module):
         x_rot_reshaped = self.rotation(x_unit_reshaped)
         
         if precomputed_scales is not None:
-            refined_gamma = precomputed_scales.contiguous().view(-1, 1)
+            refined_gamma = precomputed_scales.reshape(-1, 1)
             x_normalized = x_rot_reshaped / (refined_gamma + self.epsilon)
             indices = lloyd_max_quantize(x_normalized, self.bits, dist=self.dist)
         else:
-            x_rot_max = torch.max(torch.abs(x_rot_reshaped.float()), dim=-1, keepdim=True).values
-            
-            # SOTA FIX: Nội suy max_c từ Codebook thực tế (Gaussian vs Laplace)
             from .lloyd_max import compute_lloyd_max_codebook
             cb = compute_lloyd_max_codebook(self.bits, d=1, dist=self.dist)
-            max_c = cb['centroids'].max().item()
+            max_c = cb['max_centroid']
             
+            x_rot_max = torch.max(torch.abs(x_rot_reshaped), dim=-1, keepdim=True).values
             rms_scales = (x_rot_max / max_c).to(dtype) 
             x_normalized = x_rot_reshaped / (rms_scales + self.epsilon)
             
-            x_rot_f32 = x_rot_reshaped.float()
-            
-            # Pass 1: Lấy indices sơ bộ
-            indices_tmp = lloyd_max_quantize(x_normalized, self.bits, dist=self.dist)
-            recon_u = lloyd_max_dequantize(indices_tmp, self.bits, dist=self.dist).float()
-            
-            num = (x_rot_f32 * recon_u).sum(dim=-1, keepdim=True)
-            den = (recon_u * recon_u).sum(dim=-1, keepdim=True) + self.epsilon
-            gamma_pass1 = (num / den).to(dtype)
-            
-            # Pass 2: Tinh chỉnh tinh vi
-            x_normalized_2 = x_rot_reshaped / (gamma_pass1 + self.epsilon)
-            indices_pass2 = lloyd_max_quantize(x_normalized_2, self.bits, dist=self.dist)
-            
-            recon_f = lloyd_max_dequantize(indices_pass2, self.bits, dist=self.dist).float()
-            num_f = (x_rot_f32 * recon_f).sum(dim=-1, keepdim=True)
-            den_f = (recon_f * recon_f).sum(dim=-1, keepdim=True) + self.epsilon
-            gamma_pass2 = (num_f / den_f).to(dtype)
-            
-            # SOTA FIX: Spiky Guard (Bảo vệ hằng số/outliers cực hạn)
-            x_rot_mean = torch.mean(torch.abs(x_rot_reshaped.float()), dim=-1, keepdim=True) + self.epsilon
-            is_spiky = (x_rot_max / x_rot_mean) > 5.0
-            
-            # CỰC KỲ QUAN TRỌNG: Nếu spiky, phải dùng CẢ scale gốc VÀ indices gốc
-            refined_gamma = torch.where(is_spiky, rms_scales, gamma_pass2)
-            indices = torch.where(is_spiky, indices_tmp, indices_pass2)
-            
-        if pack:
-            indices = pack_indices(indices.view(shape + (-1,)), self.bits)
-        else:
-            indices = indices.view(shape + (-1,))
-            
+            if x.shape[0] == 1 or x_reshaped.shape[0] <= 32:
+                indices = lloyd_max_quantize(x_normalized, self.bits, dist=self.dist)
+                refined_gamma = rms_scales
+            else:
+                x_rot_f32 = x_rot_reshaped.float()
+                indices_tmp = lloyd_max_quantize(x_normalized, self.bits, dist=self.dist)
+                recon_u = lloyd_max_dequantize(indices_tmp, self.bits, dist=self.dist).float()
+                num = (x_rot_f32 * recon_u).sum(dim=-1, keepdim=True)
+                den = (recon_u * recon_u).sum(dim=-1, keepdim=True) + self.epsilon
+                gamma_pass1 = (num / den).to(dtype)
+                indices = lloyd_max_quantize(x_rot_reshaped / (gamma_pass1 + self.epsilon), self.bits, dist=self.dist)
+                x_rot_mean = torch.mean(torch.abs(x_rot_f32), dim=-1, keepdim=True) + self.epsilon
+                is_spiky = (x_rot_max / x_rot_mean) > 5.0
+                refined_gamma = torch.where(is_spiky, rms_scales, gamma_pass1)
+                if is_spiky.any():
+                    indices = torch.where(is_spiky, indices_tmp, indices)
+
+        # Final packaging for fallback
+        x_rot_out = x_rot_reshaped.view(shape + (-1,))
         meta_shape = shape + (self.n_subblocks,)
+        indices_out = indices.view(shape + (-1,))
+        if pack:
+            from .quant_base import pack_indices
+            indices_out = pack_indices(indices_out, self.bits)
+            
         return MSEQuantized(
-            indices=indices, 
+            indices=indices_out, 
             norms=vec_norms.view(meta_shape), 
             scales=refined_gamma.view(meta_shape), 
             bits=self.bits, 
-            packed=pack
+            packed=pack,
+            rotated_tensor=x_rot_out
         )
 
     def dequantize(self, q: MSEQuantized) -> torch.Tensor:
@@ -152,32 +220,37 @@ class TurboQuantMSE(nn.Module):
         return self.dequantize(self.quantize(x))
 
     def quantize_and_residual(self, x: torch.Tensor, pack: bool = True, precomputed_norms: torch.Tensor = None, precomputed_scales: torch.Tensor = None) -> Tuple[MSEQuantized, torch.Tensor]:
+        # SOTA v12.7: Leverage zero-allocation path for CUDA Graphs
         mse_q = self.quantize(x, pack=pack, precomputed_norms=precomputed_norms, precomputed_scales=precomputed_scales)
         
+        # 1. Zero-Allocation Reconstruction
+        # SOTA v12.7: Pre-allocate static recon buffer
+        n_tokens = x.reshape(-1, self.block_size).shape[0]
+        if not hasattr(self, "_static_recon") or self._static_recon.shape[0] < n_tokens:
+            self._static_recon = torch.empty((self._static_out_indices.shape[0], self.block_size), dtype=torch.float32, device=x.device)
+            self._static_residual = torch.empty((self._static_out_indices.shape[0], self.block_size), dtype=x.dtype, device=x.device)
+
+        # Unpack indices for reconstruction (Matches v12.6 slicing)
+
         indices = unpack_indices(mse_q.indices, self.bits, self.block_size * self.n_subblocks) if pack else mse_q.indices
+        
+        # SOTA: In-place Reconstruction using pre-allocated centroids (lloyd_max)
+        # We assume lloyd_max_dequantize is being called on the sliced indices
         reconstructed_unit = lloyd_max_dequantize(indices, self.bits, dist='gaussian')
-        recon_reshaped = reconstructed_unit.view(-1, self.block_size)
         
-        scales_flat = mse_q.scales.contiguous().view(-1, 1)
-        norms_flat = mse_q.norms.contiguous().view(-1, 1)
+        # 2. Reconstruct rotated blocks using metadata
+        scales = mse_q.scales.float().reshape(-1, 1)
+        recon_rotated = self._static_recon[:n_tokens]
+        torch.mul(reconstructed_unit.view(-1, self.block_size), scales, out=recon_rotated)
         
-        reconstructed_rotated_blocks = recon_reshaped * scales_flat
+        # 3. Get actual rotated blocks (Zero-Copy slicing from v12.6)
+        x_rotated_blocks = mse_q.rotated_tensor.view(-1, self.block_size)
         
-        x_fp32 = x.float()
-        if self.padded:
-            x_padded_init = F.pad(x_fp32, (0, self.block_size * self.n_subblocks - self.dim))
-        else:
-            x_padded_init = x_fp32
-            
-        x_reshaped = x_padded_init.contiguous().view(-1, self.block_size)
-        x_unit_blocks = x_reshaped / (norms_flat + self.epsilon)
+        # 4. In-place Residual Calculation (CRITICAL for CUDA Graphs)
+        residual = self._static_residual[:n_tokens]
+        torch.sub(x_rotated_blocks, recon_rotated.to(x.dtype), out=residual)
         
-        x_rotated_blocks = self.rotation(x_unit_blocks.to(x.dtype))
-        
-        residual_rotated_blocks = x_rotated_blocks.float() - reconstructed_rotated_blocks.float()
-        residual_rotated = residual_rotated_blocks.view(x_padded_init.shape)
-        
-        return mse_q, residual_rotated.to(x.dtype)
+        return mse_q, residual
 
 
 class TurboQuantProd(nn.Module):
@@ -204,38 +277,53 @@ class TurboQuantProd(nn.Module):
     def quantize(self, x: torch.Tensor, pack: bool = True, precomputed_norms=None, precomputed_scales=None, precomputed_res_norms=None) -> ProdQuantized:
         mse_q, residual_rotated = self.mse_quantizer.quantize_and_residual(x, pack=False, precomputed_norms=precomputed_norms, precomputed_scales=precomputed_scales)
         
-        qjl_sign_bits = (residual_rotated >= 0).to(torch.uint8)
+        # SOTA v12.7: Ensure correct 4D shapes for Cache Manager
+        orig_heads_seq = x.shape[:-1]
+        n_tokens = residual_rotated.shape[0]
+        
+        # SOTA v12.7: Zero-Allocation static sign bits
+        if not hasattr(self, "_static_sign_bits") or self._static_sign_bits.shape[0] < n_tokens:
+            self._static_sign_bits = torch.empty((self.mse_quantizer._static_out_indices.shape[0], self.block_size), dtype=torch.uint8, device=x.device)
+            # Pre-allocate meta buffer: [norms, scales, residual_norms] -> size 3
+            self._static_meta = torch.empty((self.mse_quantizer._static_out_indices.shape[0], 3), dtype=torch.float32, device=x.device)
+
+        # In-place Sign Check
+        qjl_sign_bits_raw = self._static_sign_bits[:n_tokens]
+        torch.ge(residual_rotated, 0, out=qjl_sign_bits_raw)
         
         if precomputed_res_norms is not None:
             residual_norms = precomputed_res_norms
         else:
-            res_reshaped = residual_rotated.float().view(-1, self.block_size)
+            res_reshaped = residual_rotated.float()
             res_norms_unit = torch.norm(res_reshaped, p=2, dim=-1, keepdim=True)
-            residual_norms = (res_norms_unit * mse_q.norms.contiguous().view(-1, 1)).view(mse_q.norms.shape)
+            residual_norms = res_norms_unit * mse_q.norms.contiguous().view(-1, 1)
 
         mse_indices = mse_q.indices
+        final_qjl_signs = qjl_sign_bits_raw
+        
         if pack:
-            mse_indices = pack_indices(mse_indices, self.mse_bits)
-            qjl_sign_bits = pack_indices(qjl_sign_bits, 1)
+            from .quant_base import pack_indices
+            mse_indices = pack_indices(mse_indices.view(-1, self.block_size), self.mse_bits).view(orig_heads_seq + (-1,))
+            final_qjl_signs = pack_indices(qjl_sign_bits_raw, 1).view(orig_heads_seq + (-1,))
+        else:
+            final_qjl_signs = qjl_sign_bits_raw.view(orig_heads_seq + (-1,))
 
-        # SOTA Fast-Path: Pre-pack metadata for single-dispatch copy
-        # Flattening ensures we have (total_blocks, 3) per head when reshaped in manager
-        # If seq_len=1, this is (1, n_heads, 1, 3 * n_subblocks)
-        meta = torch.cat([
-            mse_q.norms.float(), 
-            mse_q.scales.float(), 
-            residual_norms.float()
-        ], dim=-1)
+        # SOTA v12.7: Pre-pack metadata into static buffer (No Allocation)
+        meta = self._static_meta[:n_tokens].view(orig_heads_seq + (-1,))
+        meta[..., 0:1].copy_(mse_q.norms.float().view(orig_heads_seq + (1,)))
+        meta[..., 1:2].copy_(mse_q.scales.float().view(orig_heads_seq + (1,)))
+        meta[..., 2:3].copy_(residual_norms.float().view(orig_heads_seq + (1,)))
 
         return ProdQuantized(
             mse_indices=mse_indices,
-            qjl_signs=qjl_sign_bits,
-            scales=mse_q.scales,
-            residual_norms=residual_norms,
-            norms=mse_q.norms,
+            qjl_signs=final_qjl_signs,
+            scales=mse_q.scales.view(orig_heads_seq + (-1,)),
+            residual_norms=residual_norms.view(orig_heads_seq + (-1,)),
+            norms=mse_q.norms.view(orig_heads_seq + (-1,)),
             mse_bits=self.mse_bits,
             packed=pack,
-            meta=meta
+            meta=meta,
+            rotated_tensor=mse_q.rotated_tensor
         )
 
     def dequantize(self, q: ProdQuantized) -> torch.Tensor:

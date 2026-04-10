@@ -12,6 +12,7 @@ class MSEQuantized(NamedTuple):
     scales: torch.Tensor        # (..., 1) dynamic RMS scales per vector
     bits: int                   # bits per index
     packed: bool = False        # whether indices are bit-packed
+    rotated_tensor: Optional[torch.Tensor] = None # SOTA v9.4: Fused rotation result
 
 class ProdQuantized(NamedTuple):
     """Output of TurboQuantProd.quantize()."""
@@ -23,6 +24,7 @@ class ProdQuantized(NamedTuple):
     mse_bits: int                  # bits per MSE index (= total_bits - 1)
     packed: bool = False           # whether data is bit-packed
     meta: Optional[torch.Tensor] = None # SOTA: Pre-packed [norms, scales, residual_norms]
+    rotated_tensor: Optional[torch.Tensor] = None # SOTA v9.4: Fused rotation result
 
 class ValueQuantized(NamedTuple):
     """Output of TurboQuantValue.quantize()."""

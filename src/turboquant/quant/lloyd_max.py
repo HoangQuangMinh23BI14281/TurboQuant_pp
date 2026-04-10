@@ -237,7 +237,8 @@ def compute_lloyd_max_codebook(bits: int, d: int = 1, dist: str = 'gaussian', ma
         if d == 1 and bits in LM_BOUNDARIES and bits in LM_CENTROIDS:
             cb = {
                 'centroids': LM_CENTROIDS[bits].clone().float(), 
-                'boundaries': LM_BOUNDARIES[bits].clone().float()
+                'boundaries': LM_BOUNDARIES[bits].clone().float(),
+                'max_centroid': LM_CENTROIDS[bits].max().item()
             }
             _CODEBOOK_CACHE[cache_key] = cb
             return cb
@@ -267,7 +268,8 @@ def compute_lloyd_max_codebook(bits: int, d: int = 1, dist: str = 'gaussian', ma
     
     cb = {
         'centroids': torch.tensor(np.sort(centroids), dtype=torch.float32),
-        'boundaries': torch.tensor(boundaries, dtype=torch.float32)
+        'boundaries': torch.tensor(boundaries, dtype=torch.float32),
+        'max_centroid': float(np.max(centroids))
     }
 
     _CODEBOOK_CACHE[cache_key] = cb

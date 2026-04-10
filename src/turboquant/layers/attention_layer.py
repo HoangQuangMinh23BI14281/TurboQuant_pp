@@ -113,24 +113,27 @@ class TurboQuantAttention(nn.Module):
                 kv_cache.k_quantizer = self.k_quantizer
                 kv_cache.v_quantizer = self.v_quantizer
 
-            # SOTA: Always use TurboQuant paged attention if cache is present
-            kv_cache.append(k, v)
-            
             # SOTA: The Compass Fix - Update container sequence length at Layer 0
             if self.layer_idx == 0:
                 if hasattr(self, "_parent_model") and hasattr(self._parent_model, "_tq_cache_override"):
                     container = self._parent_model._tq_cache_override
                     container.update_seq_length(q.shape[2])
-            
+
             if seq_q > 1:
                 if not self.is_protected:
-                    k_full = self.k_quantizer(k).to(q.dtype) if self.k_quantizer else k
-                    v_full = self.v_quantizer(v).to(q.dtype) if self.v_quantizer else v
+                    # SOTA v9.4: Fused Rotation & Quantization (One Pass)
+                    k_q = self.k_quantizer.quantize(k)
+                    v_q = self.v_quantizer.quantize(v)
                     
-                    # SOTA FIX: ĐỒNG BỘ DTYPE! Trả về đúng float16/bfloat16 của query
-                    k_full = k_full.to(q.dtype)
-                    v_full = v_full.to(q.dtype)
+                    # k_rot is now available directly from k_q without extra dispatch
+                    k_rot = k_q.rotated_tensor
+                    kv_cache.append(k, v, k_q=k_q, v_q=v_q, k_rotated=k_rot)
+                    
+                    # Dequantize for attention
+                    k_full = self.k_quantizer.dequantize(k_q).to(q.dtype)
+                    v_full = self.v_quantizer.dequantize(v_q).to(q.dtype)
                 else:
+                    kv_cache.append(k, v)
                     k_full, v_full = k, v
                 
                 if self.num_heads != self.num_kv_heads:
@@ -148,11 +151,12 @@ class TurboQuantAttention(nn.Module):
                 if not self.is_protected and kv_cache.k_centroids is None:
                     import math
                     kv_cache.k_centroids = compute_centroids(self.k_bits - 1, dist='gaussian').to(q.device, q.dtype)
-                    kv_cache.v_centroids = compute_centroids(self.v_bits, dist='gaussian').to(q.device, q.dtype)
+                    kv_cache.v_centroids = compute_centroids(self.v_bits, dist='laplace').to(q.device, q.dtype)
                     
                     # SOTA v8.7: Harden Lloyd-Max Codebooks for CUDA Graph safety
                     harden_lloyd_max(self.k_bits - 1, device=q.device, dtype=q.dtype, dist='gaussian')
-                    harden_lloyd_max(self.v_bits, device=q.device, dtype=q.dtype, dist='gaussian')
+                    harden_lloyd_max(self.v_bits, device=q.device, dtype=q.dtype, dist='laplace')
+
                     
                     # Pre-allocate static output buffer for the Triton kernel
                     D_padded = kv_cache.pool.padded_head_dim
@@ -171,6 +175,14 @@ class TurboQuantAttention(nn.Module):
                     kv_cache.static_attn_mask[0, 0, 0, :seq_q] = 0.0
             else:
                 # DECODE BRANCH (seq_q == 1)
+                if not self.is_protected:
+                    # SOTA: Execute Quantization ONCE
+                    k_q = self.k_quantizer.quantize(k)
+                    v_q = self.v_quantizer.quantize(v)
+                    kv_cache.append(k, v, k_q=k_q, v_q=v_q)
+                else:
+                    kv_cache.append(k, v)
+
                 if self.is_protected:
                     # SOTA v8.8: Graph-safe update for Protected Workspace
                     # 1. Update Workspace on GPU
