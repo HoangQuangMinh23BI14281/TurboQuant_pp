@@ -1,3 +1,4 @@
+import math
 import torch
 import triton
 import triton.language as tl
@@ -17,6 +18,7 @@ def _get_packing_params(bits: int):
 @triton.jit
 def _turboquant_paged_fused_kernel(
     Q_ROT_ptr,
+    NUM_TOKENS_ptr,          # SOTA: GPU-resident context length
     K_INDICES_ptr, K_SIGNS_ptr, K_METADATA_ptr,
     V_INDICES_ptr, V_METADATA_ptr,
     K_CENTROIDS_ptr, V_CENTROIDS_ptr,
@@ -32,7 +34,7 @@ def _turboquant_paged_fused_kernel(
     stride_sum_l, stride_sum_b, stride_sum_h, stride_sum_attr, stride_sum_d,
     stride_qr_bh, stride_qr_d,
     stride_o_bh, stride_o_d,
-    N, D,
+    D,
     K_BITS, K_VALS_PER_BYTE,
     V_BITS, V_VALS_PER_BYTE,
     N_HEADS: tl.constexpr,
@@ -46,6 +48,9 @@ def _turboquant_paged_fused_kernel(
     pid_bh = tl.program_id(0)
     q_head_idx = pid_bh % N_HEADS
     kv_head_idx = q_head_idx // (N_HEADS // N_KV_HEADS)
+    
+    # SOTA: Load context length from GPU memory (CUDA Graph friendly)
+    N = tl.load(NUM_TOKENS_ptr)
     
     d_range = tl.arange(0, BLOCK_D)
     d_mask = d_range < D
@@ -83,80 +88,79 @@ def _turboquant_paged_fused_kernel(
     sum_head_base = K_SUMMARIES_ptr + LAYER_IDX * stride_sum_l + kv_head_idx * stride_sum_h
 
     # =====================================================================
-    # VÒNG LẶP CHÍNH: Chỉ thuần túy Load và Compute
+    # VÒNG LẶP CHÍNH: Sử dụng tl.while cho context length động
     # =====================================================================
-    for start_n in range(0, N, BLOCK_N):
-        n_range = start_n + tl.arange(0, BLOCK_N)
-        n_mask = n_range < N
+    # =====================================================================
+    # SOTA: Parallel Block-Loop with Static Guard
+    # =====================================================================
+    MAX_BLOCKS = 1024 # SOTA: Fixed upper bound for CUDA Graph stability
+    for b_idx in range(MAX_BLOCKS):
+        start_n = b_idx * BLOCK_SIZE
         
-        # Lấy ID của Block vật lý trong Paged Memory
-        p_idx = start_n // BLOCK_SIZE
-        pb_id = tl.load(BLOCK_TABLE_ptr + p_idx, mask=(start_n < N))
+        # SOTA: Masking instead of break for AST compatibility
+        n_mask = (start_n + tl.arange(0, BLOCK_N)) < N
+        
+        # Lấy ID của Block vật lý trong Paged Memory (Masked load)
+        pb_id = tl.load(BLOCK_TABLE_ptr + b_idx, mask=(start_n < N), other=0)
         
         # 1. Quest: Query-Aware Sparsity Check
-        sum_block_base = sum_head_base + pb_id * stride_sum_b
-        k_min = tl.load(sum_block_base + 0 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
-        k_max = tl.load(sum_block_base + 1 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
-        
-        quest_bound_elements = tl.where(q_rot > 0, q_rot * k_max, q_rot * k_min)
-        quest_bound = tl.sum(quest_bound_elements) * SM_SCALE
-        
-        if quest_bound >= QUEST_THRESHOLD:
-            # SOTA Pillar 3: Tile-Aligned Block Optimization
-            slot_indices = tl.arange(0, BLOCK_N)
+        # SOTA: Only process if within valid sequence length
+        if start_n < N:
+            sum_block_base = sum_head_base + pb_id * stride_sum_b
+            k_min = tl.load(sum_block_base + 0 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
+            k_max = tl.load(sum_block_base + 1 * stride_sum_attr + d_range, mask=d_mask, other=0.0)
             
-            # Khởi tạo con trỏ trực tiếp
-            k_byte_base = k_idx_head_base + pb_id * stride_k_index_b + slot_indices[:, None] * stride_k_index_s
-            k_signs_base = k_sgn_head_base + pb_id * stride_k_signs_b + slot_indices[:, None] * stride_k_signs_s
+            quest_bound = tl.sum(tl.where(q_rot > 0, q_rot * k_max, q_rot * k_min)) * SM_SCALE
             
-            # 1. Load MSE Indices (Sử dụng k_byte_idx và k_shift đã hoist)
-            k_idx_packed = tl.load(k_byte_base + k_byte_idx[None, :] * stride_k_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
-            ki = ((k_idx_packed >> k_shift[None, :]).to(tl.int32) & k_mask_bits)
-            
-            # 2. Load Direct Signs
-            k_sig_packed = tl.load(k_signs_base + ks_byte_idx[None, :] * stride_k_signs_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
-            ksi = (k_sig_packed >> ks_shift[None, :]) & 1
-            
-            # 3. Key Metadata
-            k_met_base = k_meta_head_base + pb_id * stride_k_meta_b + slot_indices[:, None] * stride_k_meta_s
-            kn = tl.load(k_met_base + 0 * stride_k_meta_attr).to(tl.float32)
-            ks = tl.load(k_met_base + 1 * stride_k_meta_attr).to(tl.float32)
-            kr = tl.load(k_met_base + 2 * stride_k_meta_attr).to(tl.float32)
-            
-            # Dequantize (Tận dụng GPU Caching cho bảng Centroids)
-            k_mse = tl.load(K_CENTROIDS_ptr + ki).to(tl.float32) * kn * ks
-            k_qjl = (ksi.to(tl.float32) * 2.0 - 1.0) * kr * QJL_SCALE
-            
-            # SOTA V1.1.0: Unified Dot-Product
-            scores = tl.sum(q_rot[None, :] * (k_mse + k_qjl), 1) * SM_SCALE
-            scores = tl.where(n_mask, scores, float("-inf"))
-            
-            # Online Softmax Math
-            m_new = tl.maximum(m_i, tl.max(scores, 0))
-            alpha = tl.exp(m_i - m_new)
-            p = tl.exp(scores - m_new)
-            
-            # 2. Sparse V-Fetch (SOTA v8.5)
-            if tl.max(p) > V_SPARSE_THRESHOLD:
-                # 4. Dequantize V-Cache
-                v_idx_base = v_idx_head_base + pb_id * stride_v_index_b + slot_indices[:, None] * stride_v_index_s
-                v_met_base = v_meta_head_base + pb_id * stride_v_meta_b + slot_indices[:, None] * stride_v_meta_s
+            if quest_bound >= QUEST_THRESHOLD:
+                # SOTA Pillar 3: Tile-Aligned Block Optimization
+                slot_indices = tl.arange(0, BLOCK_N)
+                k_byte_base = k_idx_head_base + pb_id * stride_k_index_b + slot_indices[:, None] * stride_k_index_s
+                k_signs_base = k_sgn_head_base + pb_id * stride_k_signs_b + slot_indices[:, None] * stride_k_signs_s
                 
-                vn = tl.load(v_met_base + 0 * stride_v_meta_attr).to(tl.float32)
-                vs = tl.load(v_met_base + 1 * stride_v_meta_attr).to(tl.float32)
+                # 1. Load MSE Indices
+                k_idx_packed = tl.load(k_byte_base + k_byte_idx[None, :] * stride_k_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
+                ki = ((k_idx_packed >> k_shift[None, :]).to(tl.int32) & k_mask_bits)
                 
-                v_idx_packed = tl.load(v_idx_base + v_byte_idx[None, :] * stride_v_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
-                vi = ((v_idx_packed >> v_shift[None, :]).to(tl.int32) & v_mask_bits)
+                # 2. Load Direct Signs
+                k_sig_packed = tl.load(k_signs_base + ks_byte_idx[None, :] * stride_k_signs_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
+                ksi = (k_sig_packed >> ks_shift[None, :]) & 1
                 
-                v_deq = tl.load(V_CENTROIDS_ptr + vi).to(tl.float32) * vn * vs
+                # 3. Key Metadata
+                k_met_base = k_meta_head_base + pb_id * stride_k_meta_b + slot_indices[:, None] * stride_k_meta_s
+                kn = tl.load(k_met_base + 0 * stride_k_meta_attr).to(tl.float32)
+                ks = tl.load(k_met_base + 1 * stride_k_meta_attr).to(tl.float32)
+                kr = tl.load(k_met_base + 2 * stride_k_meta_attr).to(tl.float32)
                 
-                # Tích lũy (Accumulate) trên miền đã xoay Rotated Domain
-                acc = acc * alpha + tl.sum(p[:, None] * v_deq, 0)
-            else:
-                acc = acc * alpha
-            
-            l_i = l_i * alpha + tl.sum(p, 0)
-            m_i = m_new
+                k_mse = tl.load(K_CENTROIDS_ptr + ki).to(tl.float32) * kn * ks
+                k_qjl = (ksi.to(tl.float32) * 2.0 - 1.0) * kr * QJL_SCALE
+                
+                scores = tl.sum(q_rot[None, :] * (k_mse + k_qjl), 1) * SM_SCALE
+                scores = tl.where(n_mask, scores, float("-inf"))
+                
+                # Online Softmax
+                m_new = tl.maximum(m_i, tl.max(scores, 0))
+                alpha = tl.exp(m_i - m_new)
+                p = tl.exp(scores - m_new)
+                
+                # 2. Sparse V-Fetch
+                if tl.max(p) > V_SPARSE_THRESHOLD:
+                    v_idx_base = v_idx_head_base + pb_id * stride_v_index_b + slot_indices[:, None] * stride_v_index_s
+                    v_met_base = v_meta_head_base + pb_id * stride_v_meta_b + slot_indices[:, None] * stride_v_meta_s
+                    
+                    vn = tl.load(v_met_base + 0 * stride_v_meta_attr).to(tl.float32)
+                    vs = tl.load(v_met_base + 1 * stride_v_meta_attr).to(tl.float32)
+                    
+                    v_idx_packed = tl.load(v_idx_base + v_byte_idx[None, :] * stride_v_index_d, mask=(n_mask[:,None] & d_mask[None,:]), other=0)
+                    vi = ((v_idx_packed >> v_shift[None, :]).to(tl.int32) & v_mask_bits)
+                    
+                    v_deq = tl.load(V_CENTROIDS_ptr + vi).to(tl.float32) * vn * vs
+                    acc = acc * alpha + tl.sum(p[:, None] * v_deq, 0)
+                else:
+                    acc = acc * alpha
+                
+                l_i = l_i * alpha + tl.sum(p, 0)
+                m_i = m_new
 
     # Store kết quả cuối
     tl.store(OUT_ptr + pid_bh * stride_o_bh + d_range, (acc / (l_i + 1e-10)).to(tl.float32), mask=d_mask)
@@ -205,31 +209,28 @@ def turboquant_paged_fused_attention(
     pool = ptrs["pool"]
     block_table = ptrs["block_table"]
     context_len = ptrs["num_tokens"]
-    if context_len == 0:
-        # SOTA Guard: Return zero output if pool is empty
-        res = torch.zeros((BH, D), device=query.device, dtype=query.dtype)
-        if D > kv_cache.head_dim:
-            res = res[..., :kv_cache.head_dim]
-        return res.reshape(query.shape)
+    # NOTE: Do NOT compare context_len (GPU tensor) to Python int here!
+    # 'if context_len == 0:' would force a host-device sync, which is
+    # ILLEGAL during CUDA Graph capture. The kernel handles N=0 via masking.
 
-    # SOTA v8.6: Zero-Sync Dispatch (Cache Centroids)
-    if k_centroids is None:
-        k_centroids = compute_centroids(k_mse_bits, dist='gaussian').to(query.device, query.dtype)
-    if v_centroids is None:
-        v_centroids = compute_centroids(v_bits, dist='gaussian').to(query.device, query.dtype)
+    # CUDA Graph Safety: centroids and _static_out MUST be pre-initialized
+    # before graph capture. Any allocation here would be fatal.
+    assert k_centroids is not None, "k_centroids must be pre-initialized before CUDA Graph capture"
+    assert v_centroids is not None, "v_centroids must be pre-initialized before CUDA Graph capture"
+    assert hasattr(kv_cache, '_static_out'), "_static_out must be pre-allocated before CUDA Graph capture"
     
-    out = torch.zeros((BH, D), device=query.device, dtype=torch.float32)
+    # Zero the static output buffer in-place (GPU op, graph-safe)
+    out = kv_cache._static_out[0].view(BH, D)
+    out.zero_()
     tokens_per_block = pool.tokens_per_block
     
     v_sparse_threshold = pool.config.quant.v_sparse_threshold
-    
-    # print(f"[DEBUG] Paged Dispatch | context_len: {context_len}, D: {D}, BH: {BH}")
-    import math
     BLOCK_D = 2**math.ceil(math.log2(D))
     
     grid = (BH,)
     _turboquant_paged_fused_kernel[grid](
         Q_ROT_ptr=q_rot,
+        NUM_TOKENS_ptr=context_len,
         K_INDICES_ptr=pool.k_indices,
         K_SIGNS_ptr=pool.k_qjl,
         K_METADATA_ptr=pool.k_metadata,
@@ -273,16 +274,16 @@ def turboquant_paged_fused_attention(
         stride_sum_d=pool.k_summaries.stride(4),
         stride_qr_bh=q_rot.stride(0), stride_qr_d=q_rot.stride(1),
         stride_o_bh=out.stride(0), stride_o_d=out.stride(1),
-        N=context_len, D=D,
+        D=D,
         K_BITS=k_mse_bits, K_VALS_PER_BYTE=8 // k_mse_bits,
         V_BITS=v_bits, V_VALS_PER_BYTE=8 // v_bits,
         N_HEADS=n_heads,
         N_KV_HEADS=kv_cache.n_kv_heads,
-        BLOCK_SIZE=tokens_per_block,
+        BLOCK_SIZE=pool.tokens_per_block,
         QJL_SCALE=qjl_scale,
         SM_SCALE=sm_scale, 
         QUEST_THRESHOLD=quest_threshold,
-        V_SPARSE_THRESHOLD=v_sparse_threshold,
+        V_SPARSE_THRESHOLD=pool.config.quant.v_sparse_threshold,
         BLOCK_N=pool.config.hw.triton_block_n,
         BLOCK_D=BLOCK_D,
         num_warps=pool.config.hw.triton_num_warps

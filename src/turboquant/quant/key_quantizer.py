@@ -218,6 +218,15 @@ class TurboQuantProd(nn.Module):
             mse_indices = pack_indices(mse_indices, self.mse_bits)
             qjl_sign_bits = pack_indices(qjl_sign_bits, 1)
 
+        # SOTA Fast-Path: Pre-pack metadata for single-dispatch copy
+        # Flattening ensures we have (total_blocks, 3) per head when reshaped in manager
+        # If seq_len=1, this is (1, n_heads, 1, 3 * n_subblocks)
+        meta = torch.cat([
+            mse_q.norms.float(), 
+            mse_q.scales.float(), 
+            residual_norms.float()
+        ], dim=-1)
+
         return ProdQuantized(
             mse_indices=mse_indices,
             qjl_signs=qjl_sign_bits,
@@ -226,6 +235,7 @@ class TurboQuantProd(nn.Module):
             norms=mse_q.norms,
             mse_bits=self.mse_bits,
             packed=pack,
+            meta=meta
         )
 
     def dequantize(self, q: ProdQuantized) -> torch.Tensor:

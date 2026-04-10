@@ -78,7 +78,8 @@ def paged_turboquant_attention(
     
     if kv_cache.k_quantizer is None or seq_q > 1:
         ptrs = kv_cache.get_paged_ptrs()
-        num_tokens = ptrs["num_tokens"]
+        # Use Python shadow for FP16 fallback path (avoids GPU tensor → Python sync)
+        num_tokens = kv_cache.num_tokens
         tokens_per_block = ptrs["tokens_per_block"]
         block_table = ptrs["block_table"]
         
@@ -153,30 +154,37 @@ def paged_turboquant_attention(
                 
                 v_deq_sub = v_unit_sub * vn
                 v_all.append(v_deq_sub.reshape(n_heads, -1).to(query.dtype))
+        elif hasattr(kv_cache, 'static_k_fp16'):
+            # SOTA v8.8: Static Workspace Path (CUDA Graph Safe)
+            # Use the pre-allocated flat buffers and the GPU-updated mask
+            k_cache = kv_cache.static_k_fp16
+            v_cache = kv_cache.static_v_fp16
+            current_mask = kv_cache.static_attn_mask
         else:
             # FIX: Nhánh FP16 Thuần (Dành cho Protected Layers như Layer 0, Layer 23)
-            # Xóa sạch mớ rác block_size ở đây, chỉ cần lôi dữ liệu từ cache ra
+            # Use block_ids (Python list from prefill), NOT block_table (pre-allocated for Triton)
             for i in range(num_tokens):
                 block_idx = i // tokens_per_block
                 slot_idx = i % tokens_per_block
-                physical_block = block_table[block_idx].item()
+                physical_block = kv_cache.block_ids[block_idx]
                 k_all.append(kv_cache.k_fp16[physical_block][:, slot_idx])
                 v_all.append(kv_cache.v_fp16[physical_block][:, slot_idx])
             
-        k_cache = torch.stack(k_all, dim=1).unsqueeze(0).to(query.dtype)
-        v_cache = torch.stack(v_all, dim=1).unsqueeze(0).to(query.dtype)
+            k_cache = torch.stack(k_all, dim=1).unsqueeze(0).to(query.dtype)
+            v_cache = torch.stack(v_all, dim=1).unsqueeze(0).to(query.dtype)
+            current_mask = mask if seq_q > 1 else None
         
         if query.shape[1] != k_cache.shape[1]:
             scale = query.shape[1] // k_cache.shape[1]
             k_cache = k_cache.repeat_interleave(scale, dim=1)
             v_cache = v_cache.repeat_interleave(scale, dim=1)
             
-        current_mask = mask if seq_q > 1 else None
         real_is_causal = (seq_q > 1) and (current_mask is None)
         
         return torch.nn.functional.scaled_dot_product_attention(
             query, k_cache.to(query.dtype), v_cache.to(query.dtype), 
-            attn_mask=current_mask, is_causal=real_is_causal
+            attn_mask=current_mask.to(query.dtype) if current_mask is not None else None, 
+            is_causal=real_is_causal
         )
 
     if not HAS_TRITON or not query.is_cuda:

@@ -8,6 +8,8 @@ from turboquant.quant.value_quantizer import TurboQuantValue
 from turboquant.cache.manager import TurboQuantKVCache
 from turboquant.kernels.fused_attention import turboquant_attention
 from turboquant.kernels.fused_attention import paged_turboquant_attention
+from turboquant.kernels.paged_fused import compute_centroids  # Module-level: no runtime import during decode
+from turboquant.quant.lloyd_max import harden_lloyd_max # SOTA v8.7: Guard against .to() during capture
 from turboquant.cache.routing import QuantizationStrategy
 from turboquant.ops.rope import apply_rotary_pos_emb
 
@@ -140,15 +142,72 @@ class TurboQuantAttention(nn.Module):
                 out = torch.nn.functional.scaled_dot_product_attention(
                     q, k_full, v_full, attn_mask=mask_entry, is_causal=is_causal
                 )
-            else:
-                # 2.2 Decode Path: Paged Triton Kernel
-                # SOTA v8.6: Zero-Sync Centroid Dispatch
-                if kv_cache.k_centroids is None and not self.is_protected:
-                    from ..kernels.paged_fused import compute_centroids
+                
+                # CUDA Graph Safety: Pre-initialize centroids and _static_out
+                # during the FIRST prefill pass so they're ready for decode.
+                if not self.is_protected and kv_cache.k_centroids is None:
+                    import math
                     kv_cache.k_centroids = compute_centroids(self.k_bits - 1, dist='gaussian').to(q.device, q.dtype)
                     kv_cache.v_centroids = compute_centroids(self.v_bits, dist='gaussian').to(q.device, q.dtype)
+                    
+                    # SOTA v8.7: Harden Lloyd-Max Codebooks for CUDA Graph safety
+                    harden_lloyd_max(self.k_bits - 1, device=q.device, dtype=q.dtype, dist='gaussian')
+                    harden_lloyd_max(self.v_bits, device=q.device, dtype=q.dtype, dist='gaussian')
+                    
+                    # Pre-allocate static output buffer for the Triton kernel
+                    D_padded = kv_cache.pool.padded_head_dim
+                    D = 2**math.ceil(math.log2(D_padded)) if D_padded > 0 else self.head_dim
+                    kv_cache._static_out = torch.zeros(
+                        (1, self.num_heads, 1, D), device=q.device, dtype=torch.float32
+                    )
+
+                # SOTA v8.8: Initialize Static FP16 Workspace for Protected Layers
+                if self.is_protected and not hasattr(kv_cache, 'static_k_fp16'):
+                    kv_cache.init_static_fp16_workspace(self.num_kv_heads, self.head_dim, kv_cache.pool.config.max_seq_len)
+                    # Sync initial tokens into the workspace (batch=0, heads, seq, dim)
+                    kv_cache.static_k_fp16[0, :, :seq_q] = k[0].to(torch.float16)
+                    kv_cache.static_v_fp16[0, :, :seq_q] = v[0].to(torch.float16)
+                    # Mark initial tokens as active in mask
+                    kv_cache.static_attn_mask[0, 0, 0, :seq_q] = 0.0
+            else:
+                # DECODE BRANCH (seq_q == 1)
+                if self.is_protected:
+                    # SOTA v8.8: Graph-safe update for Protected Workspace
+                    # 1. Update Workspace on GPU
+                    # We use the fact that num_tokens_ptr is the EXACT index for the new token
+                    idx = kv_cache.num_tokens_ptr.item() if not torch.cuda.is_current_stream_capturing() else 0 # Dummy for capture
+                    
+                    # During REAL capture/replay, we rely on the fact that indexing with a tensor 
+                    # inside a graph must be handled carefully. 
+                    # For K/V, we can use slice-based copy if we use a pre-calculated index.
+                    # However, a cleaner way for CUDA Graphs is scatter_.
+                    
+                    # Update K/V: (1, n_heads, 1, head_dim) -> (1, n_heads, max_seq_len, head_dim)
+                    # Note: k has shape (1, n_heads, 1, head_dim) after RoPE
+                    k_f16 = k.to(torch.float16)
+                    v_f16 = v.to(torch.float16)
+                    
+                    # SOTA: The GPU-Only Indexing
+                    # scatter_ is fully graph-compatible. 
+                    # We scatter across the 'seq_len' dimension (dim=2 for k/v, dim=3 for mask)
+                    target_idx = kv_cache.num_tokens_ptr.view(1, 1, 1, 1).expand(1, self.num_kv_heads, 1, self.head_dim)
+                    kv_cache.static_k_fp16.scatter_(2, target_idx, k_f16)
+                    kv_cache.static_v_fp16.scatter_(2, target_idx, v_f16)
+                    
+                    # Update Mask: [1, 1, 1, max_seq_len]
+                    mask_idx = kv_cache.num_tokens_ptr.view(1, 1, 1, 1)
+                    kv_cache.static_attn_mask.scatter_(3, mask_idx, 0.0)
                 
+                # SOTA: Flash-Paged Attention CallKernel (Zero-Sync)
                 sm_scale = self.tq_config.sm_scale if self.tq_config.sm_scale is not None else 1.0 / (self.head_dim ** 0.5)
+                
+                # CUDA Graph Safety: centroids MUST already be initialized from prefill
+                if not self.is_protected:
+                    assert kv_cache.k_centroids is not None, (
+                        f"Layer {self.layer_idx}: k_centroids not initialized. "
+                        "Run prefill before decode to pre-initialize."
+                    )
+
                 out = paged_turboquant_attention(
                     query=q, 
                     kv_cache=kv_cache, 

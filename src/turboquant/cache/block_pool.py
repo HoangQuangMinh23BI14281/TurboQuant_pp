@@ -69,6 +69,20 @@ class KVBlockPool:
         self.allocated_blocks += 1
         return self.free_blocks.pop(0)
 
+    def allocate_layer_blocks(self, num_blocks: int) -> torch.Tensor:
+        """SOTA: Pre-allocate a slab of blocks for a specific layer.
+        Essential for CUDA Graphs to avoid Python allocation in loop.
+        """
+        if len(self.free_blocks) < num_blocks:
+            raise MemoryError(f"KVPool exhaustion: requested {num_blocks} but only {len(self.free_blocks)} free.")
+        
+        blocks = []
+        for _ in range(num_blocks):
+            blocks.append(self.free_blocks.pop(0))
+            self.allocated_blocks += 1
+            
+        return torch.tensor(blocks, dtype=torch.int32, device=self.device)
+
     def free_block(self, block_id: int):
         self.free_blocks.append(block_id)
         self.allocated_blocks -= 1

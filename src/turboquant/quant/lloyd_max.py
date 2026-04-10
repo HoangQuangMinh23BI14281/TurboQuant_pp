@@ -201,6 +201,18 @@ def _laplace_conditional_expectation(a: float, b: float, b_param: float = 1.0) -
 # ──────────────────────────────────────────────────────────────────────
 
 _CODEBOOK_CACHE = {}
+_DEVICE_CODEBOOK_CACHE = {} # SOTA v8.7: Guard against .to() during CUDA Graph capture
+
+def harden_lloyd_max(bits: int, device: torch.device, dtype: torch.dtype, dist: str = 'gaussian'):
+    """Force-cache codebooks on a specific device/dtype for CUDA Graph safety."""
+    cb = compute_lloyd_max_codebook(bits, d=1, dist=dist)
+    key = (bits, dist, str(device), dtype)
+    if key not in _DEVICE_CODEBOOK_CACHE:
+        _DEVICE_CODEBOOK_CACHE[key] = {
+            'centroids': cb['centroids'].to(device, dtype),
+            'boundaries': cb['boundaries'].to(device, dtype)
+        }
+    return _DEVICE_CODEBOOK_CACHE[key]
 
 def compute_lloyd_max_codebook(bits: int, d: int = 1, dist: str = 'gaussian', max_iter: int = 40, epsilon: float = 1e-10) -> Dict:
     """
@@ -262,12 +274,30 @@ def compute_lloyd_max_codebook(bits: int, d: int = 1, dist: str = 'gaussian', ma
     return cb
 
 def lloyd_max_quantize(x: torch.Tensor, bits: int, d: Optional[int] = None, dist: str = 'gaussian') -> torch.Tensor:
-    cb = compute_lloyd_max_codebook(int(bits), d=(d if d else 1), dist=dist)
-    bounds = cb['boundaries'].to(x.device, x.dtype)
+    # SOTA v8.7: Fast-path for CUDA Graphs
+    key = (int(bits), dist, str(x.device), x.dtype)
+    if key in _DEVICE_CODEBOOK_CACHE:
+        bounds = _DEVICE_CODEBOOK_CACHE[key]['boundaries']
+    else:
+        # Fallback (non-graph path or first run)
+        cb = compute_lloyd_max_codebook(int(bits), d=(d if d else 1), dist=dist)
+        bounds = cb['boundaries'].to(x.device, x.dtype)
+        if not torch.cuda.is_current_stream_capturing():
+            _DEVICE_CODEBOOK_CACHE[key] = {'boundaries': bounds, 'centroids': cb['centroids'].to(x.device, x.dtype)}
+            
     indices = torch.bucketize(x.contiguous(), bounds)
     return indices.clamp(0, (1 << int(bits)) - 1).long()
 
 def lloyd_max_dequantize(indices: torch.Tensor, bits: int, d: Optional[int] = None, dist: str = 'gaussian') -> torch.Tensor:
-    cb = compute_lloyd_max_codebook(int(bits), d=(d if d else 1), dist=dist)
-    centroids = cb['centroids'].to(indices.device).view(-1)
-    return centroids[indices.long().clamp(0, (1 << int(bits)) - 1).contiguous()]
+    # SOTA v8.7: Fast-path for CUDA Graphs
+    key = (int(bits), dist, str(indices.device), torch.float16) # Optimization: centroids usually f16
+    if key in _DEVICE_CODEBOOK_CACHE:
+        centroids = _DEVICE_CODEBOOK_CACHE[key]['centroids']
+    else:
+        cb = compute_lloyd_max_codebook(int(bits), d=(d if d else 1), dist=dist)
+        centroids = cb['centroids'].to(indices.device)
+        if not torch.cuda.is_current_stream_capturing():
+             _DEVICE_CODEBOOK_CACHE[key] = {'centroids': centroids, 'boundaries': cb['boundaries'].to(indices.device)}
+
+    centroids_view = centroids.view(-1)
+    return centroids_view[indices.long().clamp(0, (1 << int(bits)) - 1).contiguous()]

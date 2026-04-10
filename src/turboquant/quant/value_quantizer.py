@@ -24,12 +24,20 @@ class TurboQuantValue(nn.Module):
 
     def quantize(self, x: torch.Tensor, pack: bool = True) -> ValueQuantized:
         mse_q = self.mse_quantizer.quantize(x, pack=pack)
+        # SOTA Fast-Path: Pre-pack metadata for single-dispatch copy
+        # For Value, we have [norms, scales]
+        meta = torch.cat([
+            mse_q.norms.float(), 
+            mse_q.scales.float()
+        ], dim=-1)
+
         return ValueQuantized(
             indices=mse_q.indices,
             norms=mse_q.norms,
             scales=mse_q.scales,
             bits=self.bits,
-            packed=pack
+            packed=pack,
+            meta=meta
         )
 
     def dequantize(self, q: ValueQuantized) -> torch.Tensor:

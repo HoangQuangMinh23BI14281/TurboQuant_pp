@@ -92,8 +92,9 @@ def _wrap_hf_forward(layer: TurboQuantAttention):
     Monkey-patches our layer with a forward method that understands 
     HuggingFace's Attention input signature.
     """
-    original_forward = layer.forward
-    
+    if hasattr(layer, "_tq_patched"):
+        return
+        
     def hf_forward(
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -110,8 +111,10 @@ def _wrap_hf_forward(layer: TurboQuantAttention):
 
         # 2. Chạy toán học SOTA
         try:
-            # Note: actual_kv_cache handles all logic internally
-            attn_output, attn_weights = original_forward(
+            # We explicitly call the TurboQuantAttention.forward on this layer
+            # to avoid any potential recursion from instance-level patching.
+            attn_output, attn_weights = TurboQuantAttention.forward(
+                layer,
                 query=hidden_states, 
                 key=hidden_states, 
                 value=hidden_states, 
@@ -120,6 +123,9 @@ def _wrap_hf_forward(layer: TurboQuantAttention):
                 position_ids=position_ids,
                 **kwargs
             )
+        except RecursionError:
+            print(f"!!! RECURSION ERROR DETECTED in Layer {layer.layer_idx} !!!")
+            raise
         except Exception as e:
             print(f"!!! CRITICAL ERROR in Layer {layer.layer_idx} !!!")
             import traceback
@@ -127,16 +133,11 @@ def _wrap_hf_forward(layer: TurboQuantAttention):
             raise e
             
         # 3. Nuôi "Ghost Cache" của Hugging Face
-        # Nếu HF truyền DynamicCache vào, ta CHỈ TĂNG BỘ ĐẾM để nó không bị lạc đường.
-        # Tuyệt đối không append tensor vào đây để tiết kiệm 100% VRAM!
         if past_key_value is not None:
-            # HF DynamicCache uses _seen_tokens (pre 4.40) or get_seq_length() 
-            # We strictly sync _seen_tokens only at Layer 0 (the leader)
             if hasattr(past_key_value, "_seen_tokens") and layer.layer_idx == 0:
                 past_key_value._seen_tokens += hidden_states.shape[1]
                 
-        # Trả lại ĐÚNG số lượng tham số mà môi trường này mong đợi (output, weights) 
-        # Note: Cache được cập nhật IN-PLACE trong manager, nhưng HF vẫn mong nhận 2 biến này
         return attn_output, attn_weights
 
     layer.forward = hf_forward
+    layer._tq_patched = True

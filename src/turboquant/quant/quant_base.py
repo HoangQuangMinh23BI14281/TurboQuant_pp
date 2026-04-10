@@ -1,5 +1,5 @@
 import torch
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 # ──────────────────────────────────────────────────────────────────────
 # Output Types (Data Structures)
@@ -22,6 +22,7 @@ class ProdQuantized(NamedTuple):
     norms: torch.Tensor            # (...,) original L2 norms
     mse_bits: int                  # bits per MSE index (= total_bits - 1)
     packed: bool = False           # whether data is bit-packed
+    meta: Optional[torch.Tensor] = None # SOTA: Pre-packed [norms, scales, residual_norms]
 
 class ValueQuantized(NamedTuple):
     """Output of TurboQuantValue.quantize()."""
@@ -30,6 +31,7 @@ class ValueQuantized(NamedTuple):
     scales: torch.Tensor        # (..., 1) dynamic RMS scales per vector
     bits: int                   # number of bits per index
     packed: bool = False        # whether data is bit-packed
+    meta: Optional[torch.Tensor] = None # SOTA: Pre-packed [norms, scales]
 
 
 # ──────────────────────────────────────────────────────────────────────
